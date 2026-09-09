@@ -12,7 +12,8 @@ services:
       - /ikuai/docker/ECH/data:/data
     command: >
       -l 0.0.0.0:30000
-      -f 你的服务地址:443
-      -token 你的令牌
+      -f hhech.nb1tap.kdns.fr:443
+      -token honghongfree
+      -ip 172.64.229.240
       -web :9090
       -routing global
