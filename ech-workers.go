@@ -48,6 +48,7 @@ var (
 	routingMode string // 分流模式: "global", "bypass_cn", "none", "custom"
 	webAddr     string // Web 管理面板监听地址
 	rulesFile   string // 自定义规则文件路径
+	rulesData   string // 面板规则持久化文件路径
 	proxyIP     string // 固定出口 IP（格式: ip 或 ip:port）
 
 	echListMu sync.RWMutex
@@ -150,6 +151,7 @@ func init() {
 	flag.StringVar(&routingMode, "routing", "global", "分流模式: global(全局代理), bypass_cn(跳过中国大陆), none(不改变代理), custom(自定义规则)")
 	flag.StringVar(&webAddr, "web", "", "Web 管理面板监听地址 (如 :9090)")
 	flag.StringVar(&rulesFile, "rules", "", "自定义规则文件路径 (routing=custom 时必需)")
+	flag.StringVar(&rulesData, "rules-data", "/data/rules.json", "面板规则持久化文件路径")
 	flag.StringVar(&proxyIP, "proxyip", "", "固定出口 IP (如 101.79.165.113 或 101.79.165.113:443)")
 }
 
@@ -231,6 +233,10 @@ func main() {
 
 	// 启动出口IP检测
 	log.Printf("[启动] 启动出口IP检测器...")
+
+	// 加载面板规则持久化文件
+	loadRulesDataFile()
+
 	startExitInfoDetector()
 
 	// 启动 Web 管理面板
@@ -738,6 +744,87 @@ func loadCustomRules(filePath string) error {
 	return nil
 }
 
+// saveCustomRules 保存自定义规则到文件
+func saveCustomRules(filePath string) error {
+	customRulesMu.RLock()
+	rules := make([]customRule, len(customRules))
+	copy(rules, customRules)
+	customRulesMu.RUnlock()
+
+	// 确保目录存在
+	dir := filePath[:strings.LastIndex(filePath, "/")]
+	if dir == "" {
+		dir = filePath[:strings.LastIndex(filePath, "\\")]
+	}
+	if dir != "" {
+		os.MkdirAll(dir, 0755)
+	}
+
+	file, err := os.Create(filePath)
+	if err != nil {
+		return fmt.Errorf("创建规则文件失败: %w", err)
+	}
+	defer file.Close()
+
+	for _, rule := range rules {
+		fmt.Fprintf(file, "%s,%s,%s\n", rule.Type, rule.Value, rule.Action)
+	}
+
+	return nil
+}
+
+// loadRulesDataFile 从面板规则持久化文件加载规则
+func loadRulesDataFile() {
+	if rulesData == "" {
+		return
+	}
+	if _, err := os.Stat(rulesData); os.IsNotExist(err) {
+		return
+	}
+	if err := loadCustomRulesFromFile(rulesData); err != nil {
+		log.Printf("[规则] 加载面板规则失败: %v", err)
+	} else {
+		log.Printf("[规则] 已从面板规则文件加载 %d 条规则", len(customRules))
+	}
+}
+
+// loadCustomRulesFromFile 从文件加载规则到 customRules
+func loadCustomRulesFromFile(filePath string) error {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	var rules []customRule
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "//") {
+			continue
+		}
+		parts := strings.SplitN(line, ",", 3)
+		if len(parts) != 3 {
+			continue
+		}
+		ruleType := strings.TrimSpace(parts[0])
+		value := strings.TrimSpace(parts[1])
+		action := strings.TrimSpace(parts[2])
+		if (ruleType == "domain" || ruleType == "ipcidr" || ruleType == "keyword") &&
+			(action == "proxy" || action == "direct") {
+			rules = append(rules, customRule{Type: ruleType, Value: value, Action: action})
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return err
+	}
+
+	customRulesMu.Lock()
+	customRules = rules
+	customRulesMu.Unlock()
+	return nil
+}
+
 // ======================== 连接追踪与流量统计 ========================
 
 // addConn 添加连接追踪
@@ -938,6 +1025,13 @@ func handleRules(w http.ResponseWriter, r *http.Request) {
 	customRulesMu.Lock()
 	customRules = rules
 	customRulesMu.Unlock()
+
+	// 持久化到文件
+	if err := saveCustomRules(rulesData); err != nil {
+		log.Printf("[规则] 保存规则失败: %v", err)
+	} else {
+		log.Printf("[规则] 已保存 %d 条规则到 %s", len(rules), rulesData)
+	}
 
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
