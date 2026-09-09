@@ -1,8 +1,8 @@
 {
   "listen_addr": "0.0.0.0:30000",
-  "server_addr": "你的服务地址:443",
+  "server_addr": "hhech.nb1tap.kdns.fr:443",
   "server_ip": "172.64.229.240",
-  "token": "你的令牌",
+  "token": "honghongfree",
   "dns_server": "dns.alidns.com/dns-query",
   "ech_domain": "cloudflare-ech.com",
   "routing_mode": "global",
