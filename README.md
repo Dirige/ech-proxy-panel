@@ -165,7 +165,7 @@ domain,github.com,proxy
 
 格式：`domain,域名,动作`（动作：`direct` 直连 / `proxy` 代理）
 
-> 注意：domain 规则是包含匹配。添加 `255432.xyz` 会匹配 `emos.255432.xyz`。如果需要精确匹配，请使用 keyword 类型。
+> domain 规则是包含匹配：添加 `255432.xyz` 会匹配 `emos.255432.xyz` 等所有子域名。
 
 挂载到容器：
 
