@@ -49,6 +49,7 @@ var (
 	webAddr     string // Web 管理面板监听地址
 	rulesFile   string // 自定义规则文件路径
 	rulesData   string // 面板规则持久化文件路径
+	configFile  string // 配置文件路径
 	proxyIP     string // 固定出口 IP（格式: ip 或 ip:port）
 
 	echListMu sync.RWMutex
@@ -120,9 +121,62 @@ type logEntry struct {
 
 // customRule 自定义规则
 type customRule struct {
-	Type  string `json:"type"`  // domain, ipcidr, keyword
-	Value string `json:"value"` // 规则值
+	Type   string `json:"type"`   // domain, ipcidr, keyword
+	Value  string `json:"value"`  // 规则值
 	Action string `json:"action"` // proxy, direct
+}
+
+// appConfig 应用配置
+type appConfig struct {
+	ListenAddr  string `json:"listen_addr"`
+	ServerAddr  string `json:"server_addr"`
+	ServerIP    string `json:"server_ip"`
+	Token       string `json:"token"`
+	DNSServer   string `json:"dns_server"`
+	ECHDomain   string `json:"ech_domain"`
+	RoutingMode string `json:"routing_mode"`
+	WebAddr     string `json:"web_addr"`
+	ProxyIP     string `json:"proxy_ip"`
+}
+
+// loadConfig 从文件加载配置
+func loadConfig(filePath string) (*appConfig, error) {
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil, err
+	}
+	var cfg appConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return nil, err
+	}
+	return &cfg, nil
+}
+
+// saveConfig 保存配置到文件
+func saveConfig(filePath string) error {
+	cfg := appConfig{
+		ListenAddr:  listenAddr,
+		ServerAddr:  serverAddr,
+		ServerIP:    serverIP,
+		Token:       token,
+		DNSServer:   dnsServer,
+		ECHDomain:   echDomain,
+		RoutingMode: routingMode,
+		WebAddr:     webAddr,
+		ProxyIP:     proxyIP,
+	}
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return err
+	}
+	dir := filePath[:strings.LastIndex(filePath, "/")]
+	if dir == "" {
+		dir = filePath[:strings.LastIndex(filePath, "\\")]
+	}
+	if dir != "" {
+		os.MkdirAll(dir, 0755)
+	}
+	return os.WriteFile(filePath, data, 0644)
 }
 
 // statusResponse 状态响应
@@ -152,11 +206,57 @@ func init() {
 	flag.StringVar(&webAddr, "web", "", "Web 管理面板监听地址 (如 :9090)")
 	flag.StringVar(&rulesFile, "rules", "", "自定义规则文件路径 (routing=custom 时必需)")
 	flag.StringVar(&rulesData, "rules-data", "/data/rules.json", "面板规则持久化文件路径")
+	flag.StringVar(&configFile, "config", "/data/config.json", "配置文件路径")
 	flag.StringVar(&proxyIP, "proxyip", "", "固定出口 IP (如 101.79.165.113 或 101.79.165.113:443)")
 }
 
 func main() {
 	flag.Parse()
+
+	// 加载配置文件（命令行参数优先）
+	if cfg, err := loadConfig(configFile); err == nil {
+		log.Printf("[启动] 已加载配置文件: %s", configFile)
+		if listenAddr == "127.0.0.1:30000" && cfg.ListenAddr != "" {
+			listenAddr = cfg.ListenAddr
+		}
+		if serverAddr == "" && cfg.ServerAddr != "" {
+			serverAddr = cfg.ServerAddr
+		}
+		if serverIP == "" && cfg.ServerIP != "" {
+			serverIP = cfg.ServerIP
+		}
+		if token == "" && cfg.Token != "" {
+			token = cfg.Token
+		}
+		if dnsServer == "dns.alidns.com/dns-query" && cfg.DNSServer != "" {
+			dnsServer = cfg.DNSServer
+		}
+		if echDomain == "cloudflare-ech.com" && cfg.ECHDomain != "" {
+			echDomain = cfg.ECHDomain
+		}
+		if routingMode == "global" && cfg.RoutingMode != "" {
+			routingMode = cfg.RoutingMode
+		}
+		if webAddr == "" && cfg.WebAddr != "" {
+			webAddr = cfg.WebAddr
+		}
+		if proxyIP == "" && cfg.ProxyIP != "" {
+			proxyIP = cfg.ProxyIP
+		}
+	} else if configFile != "" {
+		log.Printf("[启动] 配置文件不存在或无效，使用命令行参数")
+	}
+
+	// 如果没有配置文件且命令行有参数，自动保存配置
+	if _, err := os.Stat(configFile); os.IsNotExist(err) {
+		if serverAddr != "" {
+			if err := saveConfig(configFile); err != nil {
+				log.Printf("[启动] 保存配置文件失败: %v", err)
+			} else {
+				log.Printf("[启动] 已保存配置到: %s", configFile)
+			}
+		}
+	}
 
 	if serverAddr == "" {
 		log.Fatal("必须指定服务端地址 -f\n\n示例:\n  ./client -l 127.0.0.1:1080 -f your-worker.workers.dev:443 -token your-token")
@@ -997,6 +1097,13 @@ func handleConfig(w http.ResponseWriter, r *http.Request) {
 	if err := refreshECH(); err != nil {
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
+	}
+
+	// 保存配置到文件
+	if err := saveConfig(configFile); err != nil {
+		log.Printf("[配置] 保存配置文件失败: %v", err)
+	} else {
+		log.Printf("[配置] 配置已保存到: %s", configFile)
 	}
 
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
