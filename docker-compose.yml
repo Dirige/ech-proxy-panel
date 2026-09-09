@@ -1,0 +1,16 @@
+version: '3'
+services:
+  ech-workers:
+    build: .
+    image: cirnosalt/ech-workers-docker:latest
+    container_name: ech-workers
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./config:/etc/ech-workers
+    command: >
+      -l 127.0.0.1:30000
+      -f YOUR_WORKER.workers.dev:443
+      -token YOUR_TOKEN
+      -routing global
+      -web :9090

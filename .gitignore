@@ -1,0 +1,10 @@
+*.exe
+*.tar
+*.tar.gz
+*.zip
+ech-workers
+go.mod
+go.sum
+dist/
+__pycache__/
+*.pyc

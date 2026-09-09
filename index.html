@@ -1,0 +1,533 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ECH 代理面板</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+:root{
+  --bg:#0d1117;--bg-card:#161b22;--bg-hover:#1c2128;--bg-input:#0d1117;
+  --border:#30363d;--text:#e6edf3;--text-sec:#8b949e;--text-dim:#484f58;
+  --accent:#58a6ff;--accent-hover:#79c0ff;--green:#3fb950;--red:#f85149;
+  --orange:#d29922;--purple:#bc8cff;
+}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:var(--bg);color:var(--text);min-height:100vh}
+
+.sidebar{position:fixed;top:0;left:0;width:200px;height:100vh;background:var(--bg-card);border-right:1px solid var(--border);display:flex;flex-direction:column;z-index:100}
+.sidebar-brand{padding:20px 16px;font-size:15px;font-weight:600;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px}
+.sidebar-brand svg{width:22px;height:22px;fill:var(--accent)}
+.sidebar-nav{flex:1;padding:8px 0}
+.nav-item{display:flex;align-items:center;gap:10px;padding:10px 16px;cursor:pointer;color:var(--text-sec);transition:all .15s;font-size:14px;border-left:3px solid transparent}
+.nav-item:hover{background:var(--bg-hover);color:var(--text)}
+.nav-item.active{background:var(--bg-hover);color:var(--accent);border-left-color:var(--accent)}
+.nav-item svg{width:18px;height:18px;flex-shrink:0}
+.sidebar-footer{padding:12px 16px;border-top:1px solid var(--border);font-size:11px;color:var(--text-dim)}
+
+.main{margin-left:200px;padding:24px;min-height:100vh}
+.page{display:none}.page.active{display:block}
+.page-title{font-size:20px;font-weight:600;margin-bottom:20px}
+
+.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:12px;margin-bottom:16px}
+.card{background:var(--bg-card);border:1px solid var(--border);border-radius:8px;padding:14px}
+.card-label{font-size:11px;color:var(--text-sec);margin-bottom:4px}
+.card-value{font-size:20px;font-weight:700}
+.card-value.green{color:var(--green)}.card-value.blue{color:var(--accent)}.card-value.orange{color:var(--orange)}.card-value.purple{color:var(--purple)}
+
+.table-wrap{background:var(--bg-card);border:1px solid var(--border);border-radius:8px;overflow:hidden;margin-bottom:16px}
+.table{width:100%;border-collapse:collapse}
+.table th,.table td{padding:8px 12px;text-align:left;font-size:13px;border-bottom:1px solid var(--border)}
+.table th{background:var(--bg);color:var(--text-sec);font-weight:600;font-size:12px}
+.table tr:hover td{background:var(--bg-hover)}
+.table .mono{font-family:'SF Mono',Consolas,monospace;font-size:12px}
+.table .tag{display:inline-block;padding:2px 8px;border-radius:12px;font-size:11px;font-weight:600}
+.tag.proxy{background:rgba(88,166,255,.15);color:var(--accent)}
+.tag.direct{background:rgba(63,185,80,.15);color:var(--green)}
+.tag.sock{background:rgba(188,140,255,.15);color:var(--purple)}
+.tag.http{background:rgba(210,153,34,.15);color:var(--orange)}
+
+.config-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px}
+.config-item{background:var(--bg-card);border:1px solid var(--border);border-radius:8px;padding:14px}
+.config-item label{display:block;font-size:11px;color:var(--text-sec);margin-bottom:6px}
+.config-item input,.config-item select{width:100%;padding:8px 12px;background:var(--bg-input);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px;font-family:inherit}
+.config-item input:focus,.config-item select:focus{outline:none;border-color:var(--accent)}
+.config-item .hint{font-size:11px;color:var(--text-dim);margin-top:4px}
+
+.btn{display:inline-flex;align-items:center;gap:6px;padding:7px 14px;border-radius:6px;font-size:13px;font-weight:500;cursor:pointer;border:1px solid var(--border);background:var(--bg-card);color:var(--text);transition:all .15s}
+.btn:hover{background:var(--bg-hover)}
+.btn-primary{background:var(--accent);border-color:var(--accent);color:#fff}
+.btn-primary:hover{background:var(--accent-hover)}
+.btn-sm{padding:5px 10px;font-size:12px}
+.actions{display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap}
+
+.domain-input{display:flex;gap:8px;margin-bottom:12px}
+.domain-input input{flex:1;padding:8px 12px;background:var(--bg-input);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px}
+.domain-input input:focus{outline:none;border-color:var(--accent)}
+
+.log-area{background:var(--bg-card);border:1px solid var(--border);border-radius:8px;padding:14px;max-height:350px;overflow-y:auto;font-family:'SF Mono',Consolas,monospace;font-size:12px;line-height:1.6}
+.log-line{white-space:pre-wrap;word-break:break-all}
+.log-line .time{color:var(--text-dim)}
+.log-line .level-info{color:var(--accent)}.log-line .level-warn{color:var(--orange)}.log-line .level-error{color:var(--red)}
+
+.net-box{background:var(--bg-card);border:1px solid var(--border);border-radius:8px;padding:14px;margin-bottom:16px}
+.net-box h3{font-size:13px;color:var(--text-sec);margin-bottom:10px}
+.net-row{display:flex;align-items:center;gap:12px;font-size:13px;padding:4px 0}
+.net-row .label{color:var(--text-sec);width:100px}
+.net-row .value{font-family:'SF Mono',Consolas,monospace}
+.net-row .value.fast{color:var(--green)}.net-row .value.mid{color:var(--orange)}.net-row .value.slow{color:var(--red)}
+
+.section-title{font-size:13px;color:var(--text-sec);margin-bottom:10px}
+
+.empty{text-align:center;padding:30px;color:var(--text-dim);font-size:13px}
+
+@media(max-width:768px){
+  .sidebar{width:50px}.sidebar-brand span,.nav-item span,.sidebar-footer{display:none}
+  .sidebar-brand{justify-content:center;padding:14px 0}.nav-item{justify-content:center;padding:12px 0}
+  .main{margin-left:50px;padding:14px}
+  .cards{grid-template-columns:1fr 1fr}
+}
+</style>
+</head>
+<body>
+
+<div class="sidebar">
+  <div class="sidebar-brand">
+    <svg viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z"/></svg>
+    <span>ECH 代理</span>
+  </div>
+  <div class="sidebar-nav">
+    <div class="nav-item active" data-page="overview">
+      <svg viewBox="0 0 24 24"><path d="M3 13h8V3H3v10zm0 8h8v-6H3v6zm10 0h8V11h-8v10zm0-18v6h8V3h-8z"/></svg>
+      <span>概览</span>
+    </div>
+    <div class="nav-item" data-page="connections">
+      <svg viewBox="0 0 24 24"><path d="M1 9l2 2c4.97-4.97 13.03-4.97 18 0l2-2C16.93 2.93 7.08 2.93 1 9zm8 8l3 3 3-3c-1.65-1.66-4.34-1.66-6 0zm-4-4l2 2c2.76-2.76 7.24-2.76 10 0l2-2C15.14 9.14 8.87 9.14 5 13z"/></svg>
+      <span>连接</span>
+    </div>
+    <div class="nav-item" data-page="rules">
+      <svg viewBox="0 0 24 24"><path d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z"/></svg>
+      <span>规则</span>
+    </div>
+    <div class="nav-item" data-page="config">
+      <svg viewBox="0 0 24 24"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.07.62-.07.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg>
+      <span>配置</span>
+    </div>
+  </div>
+  <div class="sidebar-footer">ECH Workers</div>
+</div>
+
+<div class="main">
+  <!-- 概览 -->
+  <div class="page active" id="page-overview">
+    <h2 class="page-title">概览</h2>
+    <div class="cards">
+      <div class="card"><div class="card-label">上传速度</div><div class="card-value orange" id="ov-speed-up">0 B/s</div></div>
+      <div class="card"><div class="card-label">下载速度</div><div class="card-value purple" id="ov-speed-down">0 B/s</div></div>
+      <div class="card"><div class="card-label">上传总量</div><div class="card-value orange" id="ov-total-up">0 B</div></div>
+      <div class="card"><div class="card-label">下载总量</div><div class="card-value purple" id="ov-total-down">0 B</div></div>
+      <div class="card"><div class="card-label">活动连接</div><div class="card-value green" id="ov-active">0</div></div>
+      <div class="card"><div class="card-label">内存使用</div><div class="card-value" id="ov-mem">0 MB</div></div>
+    </div>
+
+    <!-- 网络信息 -->
+    <div class="net-box">
+      <h3>网络信息</h3>
+      <div class="net-row"><span class="label">本机 IP</span><span class="value" id="ov-ip">检测中...</span></div>
+      <div class="net-row"><span class="label">出口 IP</span><span class="value" id="ov-exit-ip">检测中...</span></div>
+      <div class="net-row"><span class="label">落地节点</span><span class="value" id="ov-colo">检测中...</span></div>
+      <div class="net-row"><span class="label">网络延迟</span><span class="value" id="ov-ping">检测中...</span></div>
+      <div class="net-row" style="padding-left:100px">
+        <span class="label" style="width:auto">Google</span>
+        <span class="value" id="ping-google">--</span>
+        <span class="label" style="width:auto;margin-left:16px">Cloudflare</span>
+        <span class="value" id="ping-cf">--</span>
+        <span class="label" style="width:auto;margin-left:16px">GitHub</span>
+        <span class="value" id="ping-gh">--</span>
+      </div>
+    </div>
+
+    <div class="actions">
+      <button class="btn" onclick="refreshECH()">刷新 ECH</button>
+    </div>
+    <div class="section-title">日志</div>
+    <div class="log-area" id="ov-logs"><div class="empty">暂无日志</div></div>
+  </div>
+
+  <!-- 连接 -->
+  <div class="page" id="page-connections">
+    <h2 class="page-title">活跃连接</h2>
+    <div class="actions"><button class="btn" onclick="loadConnections()">刷新</button></div>
+    <div class="table-wrap">
+      <table class="table">
+        <thead><tr><th>ID</th><th>来源</th><th>目标</th><th>模式</th><th>规则</th><th>开始时间</th></tr></thead>
+        <tbody id="conn-table"><tr><td colspan="6" class="empty">暂无活跃连接</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- 规则 -->
+  <div class="page" id="page-rules">
+    <h2 class="page-title">分流规则</h2>
+    <div class="actions">
+      <button class="btn btn-primary" onclick="saveRules()">保存规则</button>
+      <button class="btn" onclick="loadRules()">刷新</button>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+      <div>
+        <h3 style="font-size:14px;color:var(--green);margin-bottom:10px">直连域名</h3>
+        <div class="domain-input">
+          <input id="direct-input" placeholder="输入域名，如 baidu.com" onkeydown="if(event.key==='Enter')addDomain('direct')">
+          <button class="btn btn-sm" onclick="addDomain('direct')">添加</button>
+        </div>
+        <div class="table-wrap">
+          <table class="table">
+            <thead><tr><th>域名</th><th style="width:50px"></th></tr></thead>
+            <tbody id="direct-table"></tbody>
+          </table>
+        </div>
+      </div>
+      <div>
+        <h3 style="font-size:14px;color:var(--accent);margin-bottom:10px">代理域名</h3>
+        <div class="domain-input">
+          <input id="proxy-input" placeholder="输入域名，如 google.com" onkeydown="if(event.key==='Enter')addDomain('proxy')">
+          <button class="btn btn-sm" onclick="addDomain('proxy')">添加</button>
+        </div>
+        <div class="table-wrap">
+          <table class="table">
+            <thead><tr><th>域名</th><th style="width:50px"></th></tr></thead>
+            <tbody id="proxy-table"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 配置 -->
+  <div class="page" id="page-config">
+    <h2 class="page-title">配置</h2>
+    <div class="actions">
+      <button class="btn btn-primary" onclick="saveConfig()">保存并刷新 ECH</button>
+    </div>
+    <div class="config-grid">
+      <div class="config-item"><label>代理监听地址</label><input id="cfg-listen" readonly></div>
+      <div class="config-item"><label>服务端地址</label><input id="cfg-server" readonly></div>
+      <div class="config-item"><label>优选IP/域名</label><input id="cfg-serverip" readonly></div>
+      <div class="config-item"><label>令牌</label><input id="cfg-token" readonly></div>
+      <div class="config-item">
+        <label>分流模式</label>
+        <select id="cfg-routing">
+          <option value="global">全局代理</option>
+          <option value="bypass_cn">跳过中国大陆</option>
+          <option value="none">不改变（直连）</option>
+          <option value="custom">自定义规则</option>
+        </select>
+      </div>
+      <div class="config-item">
+        <label>固定出口IP</label>
+        <input id="cfg-proxyip" placeholder="留空=自动就近，填IP=固定出口">
+        <div class="hint">如 101.79.165.113 或 101.79.165.113:443</div>
+      </div>
+      <div class="config-item"><label>DoH 服务器</label><input id="cfg-dns"></div>
+      <div class="config-item"><label>ECH 域名</label><input id="cfg-ech"></div>
+      <div class="config-item"><label>管理面板</label><input id="cfg-web" readonly></div>
+    </div>
+  </div>
+</div>
+
+<script>
+// 导航
+document.querySelectorAll('.nav-item').forEach(el => {
+  el.addEventListener('click', () => {
+    document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+    document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+    el.classList.add('active');
+    document.getElementById('page-' + el.dataset.page).classList.add('active');
+    const pg = el.dataset.page;
+    if (pg === 'overview') loadOverview();
+    else if (pg === 'connections') loadConnections();
+    else if (pg === 'rules') loadRules();
+    else if (pg === 'config') loadConfig();
+  });
+});
+
+function fmtBytes(b) {
+  if (b === 0) return '0 B';
+  const k = 1024;
+  const units = ['B','KB','MB','GB','TB'];
+  const i = Math.floor(Math.log(b) / Math.log(k));
+  return (b / Math.pow(k, i)).toFixed(i > 0 ? 2 : 0) + ' ' + units[i];
+}
+
+function fmtSpeed(bps) {
+  if (bps === 0) return '0 B/s';
+  const k = 1024;
+  const units = ['B/s','KB/s','MB/s','GB/s'];
+  const i = Math.floor(Math.log(bps) / Math.log(k));
+  return (bps / Math.pow(k, i)).toFixed(i > 0 ? 2 : 0) + ' ' + units[i];
+}
+
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  return r.json();
+}
+
+function escHtml(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+// ========== 速度计算 ==========
+let prevTotalUp = 0, prevTotalDn = 0, prevTime = 0, firstUpdate = true;
+
+function calcSpeed(totalUp, totalDn) {
+  const now = Date.now();
+  if (firstUpdate) {
+    prevTotalUp = totalUp;
+    prevTotalDn = totalDn;
+    prevTime = now;
+    firstUpdate = false;
+    return;
+  }
+  const dt = (now - prevTime) / 1000;
+  if (dt > 0.5) {
+    const upSpeed = Math.max(0, (totalUp - prevTotalUp) / dt);
+    const dnSpeed = Math.max(0, (totalDn - prevTotalDn) / dt);
+    document.getElementById('ov-speed-up').textContent = fmtSpeed(upSpeed);
+    document.getElementById('ov-speed-down').textContent = fmtSpeed(dnSpeed);
+    prevTotalUp = totalUp;
+    prevTotalDn = totalDn;
+    prevTime = now;
+  }
+}
+
+// ========== 网络检测 ==========
+async function detectIP() {
+  try {
+    const r = await fetch('https://api.ipify.org?format=json');
+    const d = await r.json();
+    document.getElementById('ov-ip').textContent = d.ip;
+  } catch(e) {
+    document.getElementById('ov-ip').textContent = '检测失败';
+  }
+}
+
+async function detectExitInfo() {
+  try {
+    const r = await fetch('/api/exit-info');
+    const d = await r.json();
+    if (d.error) {
+      document.getElementById('ov-exit-ip').textContent = '检测失败';
+      document.getElementById('ov-colo').textContent = '检测失败';
+      return;
+    }
+    document.getElementById('ov-exit-ip').textContent = d.exit_ip || '未知';
+    document.getElementById('ov-colo').textContent = d.colo || '未知';
+  } catch(e) {
+    document.getElementById('ov-exit-ip').textContent = '检测失败';
+    document.getElementById('ov-colo').textContent = '检测失败';
+  }
+}
+
+async function pingOne(url, timeout) {
+  const start = performance.now();
+  try {
+    await fetch(url, {mode:'no-cors', cache:'no-store', signal: AbortSignal.timeout(timeout)});
+    return Math.round(performance.now() - start);
+  } catch(e) {
+    return -1;
+  }
+}
+
+async function checkPing() {
+  const timeout = 5000;
+  const [g, c, h] = await Promise.all([
+    pingOne('https://www.google.com/generate_204', timeout),
+    pingOne('https://1.1.1.1/cdn-cgi/trace', timeout),
+    pingOne('https://github.com', timeout)
+  ]);
+
+  function setPing(id, ms) {
+    const el = document.getElementById(id);
+    if (ms < 0) { el.textContent = '超时'; el.className = 'value slow'; return; }
+    el.textContent = ms + 'ms';
+    el.className = ms < 200 ? 'value fast' : ms < 500 ? 'value mid' : 'value slow';
+  }
+  setPing('ping-google', g);
+  setPing('ping-cf', c);
+  setPing('ping-gh', h);
+
+  const pings = [g, c, h].filter(p => p > 0);
+  const avg = pings.length > 0 ? Math.round(pings.reduce((a,b)=>a+b,0)/pings.length) : -1;
+  document.getElementById('ov-ping').textContent = avg > 0 ? '平均: ' + avg + 'ms' : '无法检测';
+}
+
+// ========== 概览 ==========
+async function loadOverview() {
+  const [status, logs] = await Promise.all([api('/api/status'), api('/api/logs')]);
+
+  const modes = {'global':'全局代理','bypass_cn':'跳过中国大陆','none':'不改变（直连）','custom':'自定义规则'};
+  document.getElementById('ov-active').textContent = status.active_conns;
+  document.getElementById('ov-total-up').textContent = fmtBytes(status.total_upload);
+  document.getElementById('ov-total-down').textContent = fmtBytes(status.total_download);
+  document.getElementById('ov-mem').textContent = status.memory_mb.toFixed(1) + ' MB';
+  document.getElementById('ov-mode') && (document.getElementById('ov-mode').textContent = modes[status.routing_mode] || status.routing_mode);
+
+  calcSpeed(status.total_upload, status.total_download);
+
+  const logEl = document.getElementById('ov-logs');
+  if (!logs || logs.length === 0) {
+    logEl.innerHTML = '<div class="empty">暂无日志</div>';
+    return;
+  }
+  logEl.innerHTML = logs.map(l => {
+    const cls = l.level === 'error' ? 'level-error' : l.level === 'warn' ? 'level-warn' : 'level-info';
+    return `<div class="log-line"><span class="time">${l.time}</span> <span class="${cls}">[${l.level}]</span> ${escHtml(l.msg)}</div>`;
+  }).join('');
+  logEl.scrollTop = logEl.scrollHeight;
+
+  detectIP();
+  detectExitInfo();
+  checkPing();
+}
+
+// ========== 连接 ==========
+async function loadConnections() {
+  const conns = await api('/api/connections');
+  const tbody = document.getElementById('conn-table');
+  if (!conns || conns.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="6" class="empty">暂无活跃连接</td></tr>';
+    return;
+  }
+  tbody.innerHTML = conns.map(c => {
+    const modeCls = c.mode.startsWith('sock') ? 'sock' : 'http';
+    return `<tr>
+      <td class="mono">${c.id}</td>
+      <td class="mono">${escHtml(c.source)}</td>
+      <td class="mono">${escHtml(c.target)}</td>
+      <td><span class="tag ${modeCls}">${c.mode}</span></td>
+      <td><span class="tag ${c.rule}">${c.rule === 'direct' ? '直连' : '代理'}</span></td>
+      <td>${new Date(c.start_time).toLocaleTimeString()}</td>
+    </tr>`;
+  }).join('');
+}
+
+// ========== 规则 ==========
+let directDomains = [];
+let proxyDomains = [];
+
+async function loadRules() {
+  const rules = await api('/api/rules');
+  directDomains = [];
+  proxyDomains = [];
+  (rules || []).forEach(r => {
+    if (r.type === 'domain') {
+      if (r.action === 'direct') directDomains.push(r.value);
+      else proxyDomains.push(r.value);
+    }
+  });
+  renderDomains('direct');
+  renderDomains('proxy');
+}
+
+function renderDomains(type) {
+  const list = type === 'direct' ? directDomains : proxyDomains;
+  const tbody = document.getElementById(type + '-table');
+  if (list.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="2" class="empty">暂无规则</td></tr>';
+    return;
+  }
+  tbody.innerHTML = list.map((d, i) => `<tr>
+    <td class="mono">${escHtml(d)}</td>
+    <td><button class="btn btn-sm" onclick="removeDomain('${type}',${i})" style="color:var(--red);border:none;padding:2px 6px">✕</button></td>
+  </tr>`).join('');
+}
+
+function addDomain(type) {
+  const input = document.getElementById(type + '-input');
+  const domain = input.value.trim();
+  if (!domain) return;
+  const list = type === 'direct' ? directDomains : proxyDomains;
+  if (list.includes(domain)) { input.value = ''; return; }
+  list.push(domain);
+  input.value = '';
+  renderDomains(type);
+}
+
+function removeDomain(type, idx) {
+  const list = type === 'direct' ? directDomains : proxyDomains;
+  list.splice(idx, 1);
+  renderDomains(type);
+}
+
+async function saveRules() {
+  const rules = [];
+  directDomains.forEach(d => rules.push({type:'domain', value:d, action:'direct'}));
+  proxyDomains.forEach(d => rules.push({type:'domain', value:d, action:'proxy'}));
+  await api('/api/rules', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify(rules)
+  });
+  alert('规则已保存');
+}
+
+// ========== 配置 ==========
+async function loadConfig() {
+  const c = await api('/api/config');
+  document.getElementById('cfg-listen').value = c.listen_addr;
+  document.getElementById('cfg-server').value = c.server_addr;
+  document.getElementById('cfg-serverip').value = c.server_ip;
+  document.getElementById('cfg-token').value = c.token;
+  document.getElementById('cfg-dns').value = c.dns_server;
+  document.getElementById('cfg-ech').value = c.ech_domain;
+  document.getElementById('cfg-routing').value = c.routing_mode;
+  document.getElementById('cfg-proxyip').value = c.proxy_ip || '';
+  document.getElementById('cfg-web').value = c.web_addr;
+}
+
+async function saveConfig() {
+  await api('/api/config', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({
+      dns_server: document.getElementById('cfg-dns').value,
+      ech_domain: document.getElementById('cfg-ech').value,
+      proxy_ip: document.getElementById('cfg-proxyip').value,
+      routing_mode: document.getElementById('cfg-routing').value
+    })
+  });
+  alert('配置已保存，ECH 已刷新');
+  loadConfig();
+}
+
+async function refreshECH() {
+  const r = await api('/api/service/refresh-ech', { method: 'POST' });
+  alert(r.message || r.error);
+  loadOverview();
+}
+
+// WebSocket 实时更新
+let ws;
+function connectWS() {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  ws = new WebSocket(`${proto}//${location.host}/ws`);
+  ws.onmessage = (e) => {
+    try {
+      const d = JSON.parse(e.data);
+      document.getElementById('ov-active').textContent = d.active_conns;
+      document.getElementById('ov-total-up').textContent = fmtBytes(d.total_upload);
+      document.getElementById('ov-total-down').textContent = fmtBytes(d.total_download);
+      document.getElementById('ov-mem').textContent = d.memory_mb.toFixed(1) + ' MB';
+      calcSpeed(d.total_upload, d.total_download);
+    } catch(ex) {}
+  };
+  ws.onclose = () => setTimeout(connectWS, 3000);
+}
+
+// 初始化
+loadOverview();
+connectWS();
+</script>
+</body>
+</html>
