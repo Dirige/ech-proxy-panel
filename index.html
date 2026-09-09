@@ -3,92 +3,294 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>ECH 代理面板</title>
+<title>ECH Proxy Control</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@600;700;800&family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
-*{margin:0;padding:0;box-sizing:border-box}
 :root{
-  --bg:#0d1117;--bg-card:#161b22;--bg-hover:#1c2128;--bg-input:#0d1117;
-  --border:#30363d;--text:#e6edf3;--text-sec:#8b949e;--text-dim:#484f58;
-  --accent:#58a6ff;--accent-hover:#79c0ff;--green:#3fb950;--red:#f85149;
-  --orange:#d29922;--purple:#bc8cff;
+  --bg-0:#070b14;
+  --bg-1:#0c1220;
+  --bg-2:#111a2e;
+  --glass:rgba(18,27,48,0.6);
+  --glass-strong:rgba(22,33,58,0.85);
+  --border:rgba(120,180,255,0.12);
+  --border-hover:rgba(120,180,255,0.28);
+  --text:#e8eefc;
+  --text-sec:#8b99b8;
+  --text-dim:#4a5678;
+  --cyan:#22d3ee;
+  --cyan-glow:rgba(34,211,238,0.4);
+  --green:#34d399;
+  --red:#fb7185;
+  --orange:#fbbf24;
+  --violet:#a78bfa;
+  --radius:14px;
+  --radius-sm:10px;
 }
-body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:var(--bg);color:var(--text);min-height:100vh}
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{height:100%}
+body{
+  font-family:'Inter',-apple-system,sans-serif;
+  background:var(--bg-0);
+  color:var(--text);
+  min-height:100vh;
+  overflow-x:hidden;
+  position:relative;
+}
+body::before{
+  content:'';position:fixed;inset:0;z-index:0;pointer-events:none;
+  background:
+    radial-gradient(ellipse 80% 50% at 20% -10%, rgba(34,211,238,0.12), transparent 60%),
+    radial-gradient(ellipse 60% 40% at 100% 0%, rgba(167,139,250,0.08), transparent 50%),
+    radial-gradient(ellipse 50% 50% at 50% 100%, rgba(52,211,153,0.05), transparent 60%);
+}
+body::after{
+  content:'';position:fixed;inset:0;z-index:0;pointer-events:none;opacity:0.4;
+  background-image:linear-gradient(rgba(120,180,255,0.03) 1px,transparent 1px),linear-gradient(90deg,rgba(120,180,255,0.03) 1px,transparent 1px);
+  background-size:48px 48px;
+  mask-image:radial-gradient(ellipse 70% 60% at 50% 40%,#000 30%,transparent 80%);
+}
 
-.sidebar{position:fixed;top:0;left:0;width:200px;height:100vh;background:var(--bg-card);border-right:1px solid var(--border);display:flex;flex-direction:column;z-index:100}
-.sidebar-brand{padding:20px 16px;font-size:15px;font-weight:600;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px}
-.sidebar-brand svg{width:22px;height:22px;fill:var(--accent)}
-.sidebar-nav{flex:1;padding:8px 0}
-.nav-item{display:flex;align-items:center;gap:10px;padding:10px 16px;cursor:pointer;color:var(--text-sec);transition:all .15s;font-size:14px;border-left:3px solid transparent}
-.nav-item:hover{background:var(--bg-hover);color:var(--text)}
-.nav-item.active{background:var(--bg-hover);color:var(--accent);border-left-color:var(--accent)}
-.nav-item svg{width:18px;height:18px;flex-shrink:0}
-.sidebar-footer{padding:12px 16px;border-top:1px solid var(--border);font-size:11px;color:var(--text-dim)}
+.mono{font-family:'IBM Plex Mono',monospace}
 
-.main{margin-left:200px;padding:24px;min-height:100vh}
-.page{display:none}.page.active{display:block}
-.page-title{font-size:20px;font-weight:600;margin-bottom:20px}
+/* ===== Sidebar ===== */
+.sidebar{
+  position:fixed;top:0;left:0;width:232px;height:100vh;z-index:100;
+  background:linear-gradient(180deg,rgba(12,18,32,0.9),rgba(7,11,20,0.95));
+  backdrop-filter:blur(20px);
+  border-right:1px solid var(--border);
+  display:flex;flex-direction:column;
+}
+.sidebar-brand{
+  padding:24px 20px 20px;
+  display:flex;align-items:center;gap:12px;
+  border-bottom:1px solid var(--border);
+}
+.brand-logo{
+  width:38px;height:38px;border-radius:11px;
+  background:linear-gradient(135deg,var(--cyan),#0891b2);
+  display:flex;align-items:center;justify-content:center;
+  box-shadow:0 0 24px var(--cyan-glow),inset 0 1px 0 rgba(255,255,255,0.2);
+  position:relative;
+}
+.brand-logo svg{width:20px;height:20px;fill:#04121a}
+.brand-text{display:flex;flex-direction:column}
+.brand-title{font-family:'Syne',sans-serif;font-weight:800;font-size:16px;letter-spacing:-0.02em}
+.brand-sub{font-size:10px;color:var(--text-dim);letter-spacing:0.08em;text-transform:uppercase;margin-top:2px}
 
-.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:12px;margin-bottom:16px}
-.card{background:var(--bg-card);border:1px solid var(--border);border-radius:8px;padding:14px}
-.card-label{font-size:11px;color:var(--text-sec);margin-bottom:4px}
-.card-value{font-size:20px;font-weight:700}
-.card-value.green{color:var(--green)}.card-value.blue{color:var(--accent)}.card-value.orange{color:var(--orange)}.card-value.purple{color:var(--purple)}
+.sidebar-nav{flex:1;padding:12px 10px}
+.nav-section{font-size:10px;color:var(--text-dim);letter-spacing:0.12em;text-transform:uppercase;padding:14px 12px 8px}
+.nav-item{
+  display:flex;align-items:center;gap:11px;padding:10px 12px;margin:2px 0;
+  border-radius:var(--radius-sm);cursor:pointer;color:var(--text-sec);
+  transition:all .2s cubic-bezier(.4,0,.2,1);
+  font-size:13.5px;font-weight:500;position:relative;
+}
+.nav-item svg{width:18px;height:18px;flex-shrink:0;stroke-width:1.8}
+.nav-item:hover{background:rgba(120,180,255,0.06);color:var(--text)}
+.nav-item.active{
+  background:linear-gradient(90deg,rgba(34,211,238,0.14),rgba(34,211,238,0.02));
+  color:var(--cyan);
+}
+.nav-item.active::before{
+  content:'';position:absolute;left:0;top:50%;transform:translateY(-50%);
+  width:3px;height:20px;background:var(--cyan);border-radius:0 3px 3px 0;
+  box-shadow:0 0 10px var(--cyan-glow);
+}
+.sidebar-footer{
+  padding:16px 20px;border-top:1px solid var(--border);
+  font-size:11px;color:var(--text-dim);
+  display:flex;align-items:center;gap:8px;
+}
+.status-dot{width:7px;height:7px;border-radius:50%;background:var(--green);box-shadow:0 0 8px var(--green);animation:pulse 2s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
 
-.table-wrap{background:var(--bg-card);border:1px solid var(--border);border-radius:8px;overflow:hidden;margin-bottom:16px}
+/* ===== Main ===== */
+.main{margin-left:232px;padding:28px 32px;min-height:100vh;position:relative;z-index:1}
+.page{display:none;animation:fadeUp .4s cubic-bezier(.4,0,.2,1)}
+.page.active{display:block}
+@keyframes fadeUp{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
+
+.page-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:24px}
+.page-title{font-family:'Syne',sans-serif;font-weight:700;font-size:26px;letter-spacing:-0.02em}
+.page-title .accent{color:var(--cyan)}
+
+/* ===== Cards ===== */
+.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:14px;margin-bottom:20px}
+.card{
+  background:var(--glass);backdrop-filter:blur(12px);
+  border:1px solid var(--border);border-radius:var(--radius);
+  padding:18px;position:relative;overflow:hidden;
+  transition:all .25s ease;
+}
+.card:hover{border-color:var(--border-hover);transform:translateY(-2px)}
+.card::before{
+  content:'';position:absolute;top:0;left:0;right:0;height:1px;
+  background:linear-gradient(90deg,transparent,rgba(34,211,238,0.4),transparent);
+  opacity:0;transition:opacity .25s;
+}
+.card:hover::before{opacity:1}
+.card-label{font-size:11px;color:var(--text-sec);letter-spacing:0.04em;text-transform:uppercase;margin-bottom:8px;display:flex;align-items:center;gap:6px}
+.card-value{font-family:'IBM Plex Mono',monospace;font-size:22px;font-weight:600;line-height:1.1}
+.card-value.cyan{color:var(--cyan)}
+.card-value.green{color:var(--green)}
+.card-value.orange{color:var(--orange)}
+.card-value.violet{color:var(--violet)}
+
+/* ===== Glass panel ===== */
+.panel{
+  background:var(--glass);backdrop-filter:blur(12px);
+  border:1px solid var(--border);border-radius:var(--radius);
+  overflow:hidden;margin-bottom:18px;
+}
+.panel-header{
+  padding:16px 20px;border-bottom:1px solid var(--border);
+  display:flex;align-items:center;justify-content:space-between;
+}
+.panel-title{font-size:13px;font-weight:600;color:var(--text-sec);letter-spacing:0.03em;text-transform:uppercase}
+.panel-body{padding:18px 20px}
+
+/* ===== Network info ===== */
+.net-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:14px}
+.net-item{
+  background:rgba(7,11,20,0.5);border:1px solid var(--border);
+  border-radius:var(--radius-sm);padding:14px 16px;
+  transition:border-color .2s;
+}
+.net-item:hover{border-color:var(--border-hover)}
+.net-label{font-size:11px;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.06em;margin-bottom:6px}
+.net-value{font-family:'IBM Plex Mono',monospace;font-size:15px;font-weight:500}
+.net-value.fast{color:var(--green)}.net-value.mid{color:var(--orange)}.net-value.slow{color:var(--red)}
+
+.ping-row{display:flex;gap:18px;margin-top:14px;flex-wrap:wrap}
+.ping-chip{display:flex;align-items:center;gap:8px;background:rgba(7,11,20,0.5);border:1px solid var(--border);border-radius:20px;padding:6px 14px;font-size:12px}
+.ping-chip .name{color:var(--text-sec)}.ping-chip .val{font-family:'IBM Plex Mono',monospace;font-weight:600}
+
+/* ===== Buttons ===== */
+.btn{
+  display:inline-flex;align-items:center;gap:7px;padding:9px 16px;
+  border-radius:var(--radius-sm);font-size:13px;font-weight:500;cursor:pointer;
+  border:1px solid var(--border);background:rgba(18,27,48,0.6);color:var(--text);
+  transition:all .18s ease;font-family:inherit;
+}
+.btn:hover{background:rgba(120,180,255,0.08);border-color:var(--border-hover)}
+.btn-primary{
+  background:linear-gradient(135deg,var(--cyan),#0891b2);border:none;color:#04121a;font-weight:600;
+  box-shadow:0 4px 20px var(--cyan-glow);
+}
+.btn-primary:hover{filter:brightness(1.1);transform:translateY(-1px)}
+.btn-sm{padding:6px 11px;font-size:12px}
+.btn-ghost{background:transparent;border-color:transparent;color:var(--text-sec)}
+.btn-ghost:hover{color:var(--red);background:rgba(251,113,133,0.08)}
+
+/* ===== Search / Input ===== */
+.search-box{position:relative;flex:1;max-width:420px}
+.search-box input{
+  width:100%;padding:10px 14px 10px 38px;
+  background:rgba(7,11,20,0.6);border:1px solid var(--border);border-radius:var(--radius-sm);
+  color:var(--text);font-size:13px;font-family:inherit;transition:all .18s;
+}
+.search-box input:focus{outline:none;border-color:var(--cyan);box-shadow:0 0 0 3px rgba(34,211,238,0.1)}
+.search-box svg{position:absolute;left:12px;top:50%;transform:translateY(-50%);width:16px;height:16px;color:var(--text-dim)}
+
+/* ===== Table ===== */
+.table-wrap{background:var(--glass);backdrop-filter:blur(12px);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden}
 .table{width:100%;border-collapse:collapse}
-.table th,.table td{padding:8px 12px;text-align:left;font-size:13px;border-bottom:1px solid var(--border)}
-.table th{background:var(--bg);color:var(--text-sec);font-weight:600;font-size:12px;cursor:pointer;user-select:none;white-space:nowrap}
-.table th.sortable:hover{color:var(--accent)}
-.table th .sort-arrow{font-size:10px;opacity:.5}
-.table th.sort-asc .sort-arrow::after{content:' ▲';opacity:1;color:var(--accent)}
-.table th.sort-desc .sort-arrow::after{content:' ▼';opacity:1;color:var(--accent)}
-.table tr:hover td{background:var(--bg-hover)}
-.table .mono{font-family:'SF Mono',Consolas,monospace;font-size:12px}
-.table .tag{display:inline-block;padding:2px 8px;border-radius:12px;font-size:11px;font-weight:600}
-.tag.proxy{background:rgba(88,166,255,.15);color:var(--accent)}
-.tag.direct{background:rgba(63,185,80,.15);color:var(--green)}
-.tag.sock{background:rgba(188,140,255,.15);color:var(--purple)}
-.tag.http{background:rgba(210,153,34,.15);color:var(--orange)}
+.table th,.table td{padding:11px 16px;text-align:left;font-size:13px;border-bottom:1px solid var(--border)}
+.table th{
+  background:rgba(7,11,20,0.5);color:var(--text-sec);font-weight:600;font-size:11px;
+  cursor:pointer;user-select:none;white-space:nowrap;letter-spacing:0.04em;text-transform:uppercase;
+  transition:color .15s;
+}
+.table th.sortable:hover{color:var(--cyan)}
+.table th .sort-arrow{font-size:9px;opacity:.4;margin-left:3px}
+.table th.sort-asc .sort-arrow::after{content:'▲';opacity:1;color:var(--cyan)}
+.table th.sort-desc .sort-arrow::after{content:'▼';opacity:1;color:var(--cyan)}
+.table tbody tr{transition:background .15s}
+.table tbody tr:hover{background:rgba(120,180,255,0.04)}
+.table tbody tr:last-child td{border-bottom:none}
+.table td.mono{font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--text-sec)}
 
+.tag{
+  display:inline-flex;align-items:center;gap:5px;padding:3px 10px;border-radius:20px;
+  font-size:11px;font-weight:600;letter-spacing:0.02em;
+}
+.tag::before{content:'';width:5px;height:5px;border-radius:50%}
+.tag.proxy{background:rgba(34,211,238,0.12);color:var(--cyan)}.tag.proxy::before{background:var(--cyan)}
+.tag.direct{background:rgba(52,211,153,0.12);color:var(--green)}.tag.direct::before{background:var(--green)}
+.tag.sock{background:rgba(167,139,250,0.12);color:var(--violet)}.tag.sock::before{background:var(--violet)}
+.tag.http{background:rgba(251,191,36,0.12);color:var(--orange)}.tag.http::before{background:var(--orange)}
+
+/* ===== Config ===== */
 .config-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px}
-.config-item{background:var(--bg-card);border:1px solid var(--border);border-radius:8px;padding:14px}
-.config-item label{display:block;font-size:11px;color:var(--text-sec);margin-bottom:6px}
-.config-item input,.config-item select{width:100%;padding:8px 12px;background:var(--bg-input);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px;font-family:inherit}
-.config-item input:focus,.config-item select:focus{outline:none;border-color:var(--accent)}
-.config-item .hint{font-size:11px;color:var(--text-dim);margin-top:4px}
+.config-item{
+  background:var(--glass);backdrop-filter:blur(12px);border:1px solid var(--border);
+  border-radius:var(--radius);padding:16px;transition:border-color .2s;
+}
+.config-item:hover{border-color:var(--border-hover)}
+.config-item label{display:block;font-size:11px;color:var(--text-sec);margin-bottom:8px;letter-spacing:0.04em;text-transform:uppercase}
+.config-item input,.config-item select{
+  width:100%;padding:9px 12px;background:rgba(7,11,20,0.6);
+  border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text);
+  font-size:13px;font-family:inherit;transition:all .15s;
+}
+.config-item input:focus,.config-item select:focus{outline:none;border-color:var(--cyan);box-shadow:0 0 0 3px rgba(34,211,238,0.1)}
+.config-item input[readonly]{color:var(--text-dim);background:rgba(7,11,20,0.3)}
+.config-item .hint{font-size:11px;color:var(--text-dim);margin-top:7px;line-height:1.4}
 
-.btn{display:inline-flex;align-items:center;gap:6px;padding:7px 14px;border-radius:6px;font-size:13px;font-weight:500;cursor:pointer;border:1px solid var(--border);background:var(--bg-card);color:var(--text);transition:all .15s}
-.btn:hover{background:var(--bg-hover)}
-.btn-primary{background:var(--accent);border-color:var(--accent);color:#fff}
-.btn-primary:hover{background:var(--accent-hover)}
-.btn-sm{padding:5px 10px;font-size:12px}
-.actions{display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap}
-
+/* ===== Rules ===== */
+.rules-grid{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+.rules-col{background:var(--glass);backdrop-filter:blur(12px);border:1px solid var(--border);border-radius:var(--radius);padding:18px}
+.rules-col h3{font-size:14px;font-weight:600;margin-bottom:12px;display:flex;align-items:center;gap:8px}
+.rules-col h3 .dot{width:8px;height:8px;border-radius:50%}
 .domain-input{display:flex;gap:8px;margin-bottom:12px}
-.domain-input input{flex:1;padding:8px 12px;background:var(--bg-input);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px}
-.domain-input input:focus{outline:none;border-color:var(--accent)}
+.domain-input input{
+  flex:1;padding:9px 12px;background:rgba(7,11,20,0.6);border:1px solid var(--border);
+  border-radius:var(--radius-sm);color:var(--text);font-size:13px;font-family:'IBM Plex Mono',monospace;
+}
+.domain-input input:focus{outline:none;border-color:var(--cyan)}
 
-.log-area{background:var(--bg-card);border:1px solid var(--border);border-radius:8px;padding:14px;max-height:350px;overflow-y:auto;font-family:'SF Mono',Consolas,monospace;font-size:12px;line-height:1.6}
-.log-line{white-space:pre-wrap;word-break:break-all}
+/* ===== Logs ===== */
+.log-area{
+  background:rgba(7,11,20,0.7);border:1px solid var(--border);border-radius:var(--radius);
+  padding:16px;max-height:360px;overflow-y:auto;
+  font-family:'IBM Plex Mono',monospace;font-size:12px;line-height:1.7;
+}
+.log-area::-webkit-scrollbar{width:6px}
+.log-area::-webkit-scrollbar-track{background:transparent}
+.log-area::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
+.log-line{white-space:pre-wrap;word-break:break-all;padding:2px 0}
 .log-line .time{color:var(--text-dim)}
-.log-line .level-info{color:var(--accent)}.log-line .level-warn{color:var(--orange)}.log-line .level-error{color:var(--red)}
+.log-line .level-info{color:var(--cyan)}
+.log-line .level-warn{color:var(--orange)}
+.log-line .level-error{color:var(--red)}
 
-.net-box{background:var(--bg-card);border:1px solid var(--border);border-radius:8px;padding:14px;margin-bottom:16px}
-.net-box h3{font-size:13px;color:var(--text-sec);margin-bottom:10px}
-.net-row{display:flex;align-items:center;gap:12px;font-size:13px;padding:4px 0}
-.net-row .label{color:var(--text-sec);width:100px}
-.net-row .value{font-family:'SF Mono',Consolas,monospace}
-.net-row .value.fast{color:var(--green)}.net-row .value.mid{color:var(--orange)}.net-row .value.slow{color:var(--red)}
+/* ===== Empty ===== */
+.empty{text-align:center;padding:36px 20px;color:var(--text-dim);font-size:13px}
+.empty svg{width:36px;height:36px;margin-bottom:10px;opacity:.3}
 
-.section-title{font-size:13px;color:var(--text-sec);margin-bottom:10px}
+/* ===== Actions bar ===== */
+.actions{display:flex;gap:10px;margin-bottom:18px;align-items:center;flex-wrap:wrap}
 
-.empty{text-align:center;padding:30px;color:var(--text-dim);font-size:13px}
+/* ===== Toast ===== */
+.toast{
+  position:fixed;bottom:24px;left:50%;transform:translateX(-50%) translateY(20px);
+  background:var(--glass-strong);backdrop-filter:blur(16px);border:1px solid var(--border-hover);
+  color:var(--text);padding:12px 20px;border-radius:var(--radius-sm);font-size:13px;
+  opacity:0;transition:all .3s cubic-bezier(.4,0,.2,1);z-index:1000;
+  box-shadow:0 10px 40px rgba(0,0,0,0.4);
+}
+.toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
 
 @media(max-width:768px){
-  .sidebar{width:50px}.sidebar-brand span,.nav-item span,.sidebar-footer{display:none}
-  .sidebar-brand{justify-content:center;padding:14px 0}.nav-item{justify-content:center;padding:12px 0}
-  .main{margin-left:50px;padding:14px}
+  .sidebar{width:60px}
+  .sidebar-brand{justify-content:center;padding:18px 0}
+  .brand-text,.nav-item span,.sidebar-footer span,.nav-section{display:none}
+  .nav-item{justify-content:center;padding:12px 0}
+  .main{margin-left:60px;padding:16px}
   .cards{grid-template-columns:1fr 1fr}
+  .rules-grid{grid-template-columns:1fr}
 }
 </style>
 </head>
@@ -96,73 +298,106 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 
 <div class="sidebar">
   <div class="sidebar-brand">
-    <svg viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z"/></svg>
-    <span>ECH 代理</span>
+    <div class="brand-logo">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
+    </div>
+    <div class="brand-text">
+      <span class="brand-title">ECH Proxy</span>
+      <span class="brand-sub">Control Center</span>
+    </div>
   </div>
   <div class="sidebar-nav">
+    <div class="nav-section">主菜单</div>
     <div class="nav-item active" data-page="overview">
-      <svg viewBox="0 0 24 24"><path d="M3 13h8V3H3v10zm0 8h8v-6H3v6zm10 0h8V11h-8v10zm0-18v6h8V3h-8z"/></svg>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
       <span>概览</span>
     </div>
     <div class="nav-item" data-page="connections">
-      <svg viewBox="0 0 24 24"><path d="M1 9l2 2c4.97-4.97 13.03-4.97 18 0l2-2C16.93 2.93 7.08 2.93 1 9zm8 8l3 3 3-3c-1.65-1.66-4.34-1.66-6 0zm-4-4l2 2c2.76-2.76 7.24-2.76 10 0l2-2C15.14 9.14 8.87 9.14 5 13z"/></svg>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4"/></svg>
       <span>连接</span>
     </div>
     <div class="nav-item" data-page="rules">
-      <svg viewBox="0 0 24 24"><path d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z"/></svg>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
       <span>规则</span>
     </div>
     <div class="nav-item" data-page="config">
-      <svg viewBox="0 0 24 24"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.07.62-.07.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 01-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
       <span>配置</span>
     </div>
   </div>
-  <div class="sidebar-footer">ECH Workers</div>
+  <div class="sidebar-footer">
+    <span class="status-dot"></span>
+    <span>运行中</span>
+  </div>
 </div>
 
 <div class="main">
   <!-- 概览 -->
   <div class="page active" id="page-overview">
-    <h2 class="page-title">概览</h2>
+    <div class="page-header">
+      <h1 class="page-title">运行<span class="accent">概览</span></h1>
+    </div>
     <div class="cards">
-      <div class="card"><div class="card-label">上传速度</div><div class="card-value orange" id="ov-speed-up">0 B/s</div></div>
-      <div class="card"><div class="card-label">下载速度</div><div class="card-value purple" id="ov-speed-down">0 B/s</div></div>
-      <div class="card"><div class="card-label">上传总量</div><div class="card-value orange" id="ov-total-up">0 B</div></div>
-      <div class="card"><div class="card-label">下载总量</div><div class="card-value purple" id="ov-total-down">0 B</div></div>
-      <div class="card"><div class="card-label">活动连接</div><div class="card-value green" id="ov-active">0</div></div>
-      <div class="card"><div class="card-label">内存使用</div><div class="card-value" id="ov-mem">0 MB</div></div>
+      <div class="card"><div class="card-label">↑ 上传速度</div><div class="card-value orange" id="ov-speed-up">0 B/s</div></div>
+      <div class="card"><div class="card-label">↓ 下载速度</div><div class="card-value violet" id="ov-speed-down">0 B/s</div></div>
+      <div class="card"><div class="card-label">↑ 上传总量</div><div class="card-value orange" id="ov-total-up">0 B</div></div>
+      <div class="card"><div class="card-label">↓ 下载总量</div><div class="card-value violet" id="ov-total-down">0 B</div></div>
+      <div class="card"><div class="card-label">● 活动连接</div><div class="card-value green" id="ov-active">0</div></div>
+      <div class="card"><div class="card-label">◫ 内存使用</div><div class="card-value cyan" id="ov-mem">0 MB</div></div>
     </div>
 
-    <!-- 网络信息 -->
-    <div class="net-box">
-      <h3>网络信息</h3>
-      <div class="net-row"><span class="label">本机 IP</span><span class="value" id="ov-ip">检测中...</span></div>
-      <div class="net-row"><span class="label">出口 IP</span><span class="value" id="ov-exit-ip">检测中...</span></div>
-      <div class="net-row"><span class="label">落地节点</span><span class="value" id="ov-colo">检测中...</span></div>
-      <div class="net-row"><span class="label">网络延迟</span><span class="value" id="ov-ping">检测中...</span></div>
-      <div class="net-row" style="padding-left:100px">
-        <span class="label" style="width:auto">Google</span>
-        <span class="value" id="ping-google">--</span>
-        <span class="label" style="width:auto;margin-left:16px">Cloudflare</span>
-        <span class="value" id="ping-cf">--</span>
-        <span class="label" style="width:auto;margin-left:16px">GitHub</span>
-        <span class="value" id="ping-gh">--</span>
+    <div class="panel">
+      <div class="panel-header">
+        <span class="panel-title">网络信息</span>
+        <button class="btn btn-sm" onclick="detectIP();detectExitInfo();checkPing()">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/></svg>
+          刷新
+        </button>
+      </div>
+      <div class="panel-body">
+        <div class="net-grid">
+          <div class="net-item"><div class="net-label">本机 IP</div><div class="net-value" id="ov-ip">检测中...</div></div>
+          <div class="net-item"><div class="net-label">出口 IP</div><div class="net-value" id="ov-exit-ip">检测中...</div></div>
+          <div class="net-item"><div class="net-label">落地节点</div><div class="net-value" id="ov-colo">检测中...</div></div>
+          <div class="net-item"><div class="net-label">平均延迟</div><div class="net-value" id="ov-ping">检测中...</div></div>
+        </div>
+        <div class="ping-row">
+          <div class="ping-chip"><span class="name">Google</span><span class="val" id="ping-google">--</span></div>
+          <div class="ping-chip"><span class="name">Cloudflare</span><span class="val" id="ping-cf">--</span></div>
+          <div class="ping-chip"><span class="name">GitHub</span><span class="val" id="ping-gh">--</span></div>
+        </div>
       </div>
     </div>
 
     <div class="actions">
-      <button class="btn" onclick="refreshECH()">刷新 ECH</button>
+      <button class="btn btn-primary" onclick="refreshECH()">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/></svg>
+        刷新 ECH 配置
+      </button>
     </div>
-    <div class="section-title">日志</div>
-    <div class="log-area" id="ov-logs"><div class="empty">暂无日志</div></div>
+
+    <div class="panel">
+      <div class="panel-header"><span class="panel-title">实时日志</span></div>
+      <div class="panel-body" style="padding:0">
+        <div class="log-area" id="ov-logs" style="border:none;border-radius:0"><div class="empty">暂无日志</div></div>
+      </div>
+    </div>
   </div>
 
   <!-- 连接 -->
   <div class="page" id="page-connections">
-    <h2 class="page-title">活跃连接</h2>
+    <div class="page-header">
+      <h1 class="page-title">活跃<span class="accent">连接</span></h1>
+    </div>
     <div class="actions">
-      <input id="conn-search" placeholder="搜索 ID、来源、目标、模式、规则..." style="flex:1;max-width:400px;padding:8px 12px;background:var(--bg-input);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px" oninput="loadConnections()">
-      <button class="btn" onclick="loadConnections()">刷新</button>
+      <div class="search-box">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
+        <input id="conn-search" placeholder="搜索 ID、来源、目标、模式、规则..." oninput="loadConnections()">
+      </div>
+      <button class="btn" onclick="loadConnections()">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/></svg>
+        刷新
+      </button>
     </div>
     <div class="table-wrap">
       <table class="table">
@@ -183,32 +418,34 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 
   <!-- 规则 -->
   <div class="page" id="page-rules">
-    <h2 class="page-title">分流规则</h2>
-    <div class="actions">
-      <button class="btn btn-primary" onclick="saveRules()">保存规则</button>
-      <button class="btn" onclick="loadRules()">刷新</button>
+    <div class="page-header">
+      <h1 class="page-title">分流<span class="accent">规则</span></h1>
+      <div class="actions" style="margin:0">
+        <button class="btn btn-primary" onclick="saveRules()">保存规则</button>
+        <button class="btn" onclick="loadRules()">刷新</button>
+      </div>
     </div>
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
-      <div>
-        <h3 style="font-size:14px;color:var(--green);margin-bottom:10px">直连域名</h3>
+    <div class="rules-grid">
+      <div class="rules-col">
+        <h3><span class="dot" style="background:var(--green)"></span>直连域名</h3>
         <div class="domain-input">
           <input id="direct-input" placeholder="输入域名，如 baidu.com" onkeydown="if(event.key==='Enter')addDomain('direct')">
-          <button class="btn btn-sm" onclick="addDomain('direct')">添加</button>
+          <button class="btn btn-sm btn-primary" onclick="addDomain('direct')">添加</button>
         </div>
-        <div class="table-wrap">
+        <div class="table-wrap" style="box-shadow:none">
           <table class="table">
             <thead><tr><th>域名</th><th style="width:50px"></th></tr></thead>
             <tbody id="direct-table"></tbody>
           </table>
         </div>
       </div>
-      <div>
-        <h3 style="font-size:14px;color:var(--accent);margin-bottom:10px">代理域名</h3>
+      <div class="rules-col">
+        <h3><span class="dot" style="background:var(--cyan)"></span>代理域名</h3>
         <div class="domain-input">
           <input id="proxy-input" placeholder="输入域名，如 google.com" onkeydown="if(event.key==='Enter')addDomain('proxy')">
-          <button class="btn btn-sm" onclick="addDomain('proxy')">添加</button>
+          <button class="btn btn-sm btn-primary" onclick="addDomain('proxy')">添加</button>
         </div>
-        <div class="table-wrap">
+        <div class="table-wrap" style="box-shadow:none">
           <table class="table">
             <thead><tr><th>域名</th><th style="width:50px"></th></tr></thead>
             <tbody id="proxy-table"></tbody>
@@ -220,14 +457,16 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 
   <!-- 配置 -->
   <div class="page" id="page-config">
-    <h2 class="page-title">配置</h2>
-    <div class="actions">
-      <button class="btn btn-primary" onclick="saveConfig()">保存并刷新 ECH</button>
+    <div class="page-header">
+      <h1 class="page-title">系统<span class="accent">配置</span></h1>
+      <div class="actions" style="margin:0">
+        <button class="btn btn-primary" onclick="saveConfig()">保存并刷新 ECH</button>
+      </div>
     </div>
     <div class="config-grid">
       <div class="config-item"><label>代理监听地址</label><input id="cfg-listen" readonly></div>
       <div class="config-item"><label>服务端地址</label><input id="cfg-server" readonly></div>
-      <div class="config-item"><label>优选IP/域名</label><input id="cfg-serverip" readonly></div>
+      <div class="config-item"><label>优选 IP / 域名</label><input id="cfg-serverip" readonly></div>
       <div class="config-item"><label>令牌</label><input id="cfg-token" readonly></div>
       <div class="config-item">
         <label>分流模式</label>
@@ -239,359 +478,114 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
         </select>
       </div>
       <div class="config-item">
-        <label>固定出口IP</label>
-        <input id="cfg-proxyip" placeholder="留空=自动就近，填IP=固定出口">
+        <label>固定出口 IP</label>
+        <input id="cfg-proxyip" placeholder="留空 = 自动就近分配">
         <div class="hint">如 101.79.165.113 或 101.79.165.113:443</div>
       </div>
       <div class="config-item"><label>DoH 服务器</label><input id="cfg-dns"></div>
       <div class="config-item"><label>ECH 域名</label><input id="cfg-ech"></div>
-      <div class="config-item"><label>管理面板</label><input id="cfg-web" readonly></div>
+      <div class="config-item"><label>管理面板地址</label><input id="cfg-web" readonly></div>
     </div>
   </div>
 </div>
 
+<div class="toast" id="toast"></div>
+
 <script>
-// 连接页面自动刷新
+function toast(msg){const t=document.getElementById('toast');t.textContent=msg;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),2200)}
+
 let connRefreshTimer = null;
-function startConnRefresh() {
-  stopConnRefresh();
-  connRefreshTimer = setInterval(() => {
-    if (document.getElementById('page-connections').classList.contains('active')) {
-      loadConnections();
-    }
-  }, 3000);
-}
-function stopConnRefresh() {
-  if (connRefreshTimer) { clearInterval(connRefreshTimer); connRefreshTimer = null; }
-}
+function startConnRefresh(){stopConnRefresh();connRefreshTimer=setInterval(()=>{if(document.getElementById('page-connections').classList.contains('active'))loadConnections()},3000)}
+function stopConnRefresh(){if(connRefreshTimer){clearInterval(connRefreshTimer);connRefreshTimer=null}}
 
-// 导航
-function switchPage(pg) {
-  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
-  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+function switchPage(pg){
+  document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));
+  document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
   document.querySelector(`.nav-item[data-page="${pg}"]`).classList.add('active');
-  document.getElementById('page-' + pg).classList.add('active');
-  localStorage.setItem('ech_page', pg);
-  if (pg === 'overview') loadOverview();
-  else if (pg === 'connections') { loadConnections(); startConnRefresh(); }
-  else { stopConnRefresh(); if (pg === 'rules') loadRules(); else if (pg === 'config') loadConfig(); }
+  document.getElementById('page-'+pg).classList.add('active');
+  localStorage.setItem('ech_page',pg);
+  if(pg==='overview')loadOverview();
+  else if(pg==='connections'){loadConnections();startConnRefresh()}
+  else{stopConnRefresh();if(pg==='rules')loadRules();else if(pg==='config')loadConfig()}
 }
+document.querySelectorAll('.nav-item').forEach(el=>el.addEventListener('click',()=>switchPage(el.dataset.page)));
 
-document.querySelectorAll('.nav-item').forEach(el => {
-  el.addEventListener('click', () => switchPage(el.dataset.page));
-});
-
-// 初始化 - 恢复上次的页面
-const savedPage = localStorage.getItem('ech_page') || 'overview';
+const savedPage=localStorage.getItem('ech_page')||'overview';
 switchPage(savedPage);
 
-function fmtBytes(b) {
-  if (b === 0) return '0 B';
-  const k = 1024;
-  const units = ['B','KB','MB','GB','TB'];
-  const i = Math.floor(Math.log(b) / Math.log(k));
-  return (b / Math.pow(k, i)).toFixed(i > 0 ? 2 : 0) + ' ' + units[i];
-}
+function fmtBytes(b){if(b===0)return '0 B';const k=1024;const u=['B','KB','MB','GB','TB'];const i=Math.floor(Math.log(b)/Math.log(k));return(b/Math.pow(k,i)).toFixed(i>0?2:0)+' '+u[i]}
+function fmtSpeed(bps){if(bps===0)return '0 B/s';const k=1024;const u=['B/s','KB/s','MB/s','GB/s'];const i=Math.floor(Math.log(bps)/Math.log(k));return(bps/Math.pow(k,i)).toFixed(i>0?2:0)+' '+u[i]}
+async function api(path,opts){const r=await fetch(path,opts);return r.json()}
+function escHtml(s){const d=document.createElement('div');d.textContent=s;return d.innerHTML}
 
-function fmtSpeed(bps) {
-  if (bps === 0) return '0 B/s';
-  const k = 1024;
-  const units = ['B/s','KB/s','MB/s','GB/s'];
-  const i = Math.floor(Math.log(bps) / Math.log(k));
-  return (bps / Math.pow(k, i)).toFixed(i > 0 ? 2 : 0) + ' ' + units[i];
-}
-
-async function api(path, opts) {
-  const r = await fetch(path, opts);
-  return r.json();
-}
-
-function escHtml(s) {
-  const d = document.createElement('div');
-  d.textContent = s;
-  return d.innerHTML;
-}
-
-// ========== 速度计算 ==========
-let prevTotalUp = 0, prevTotalDn = 0, prevTime = 0, firstUpdate = true;
-
-function calcSpeed(totalUp, totalDn) {
-  const now = Date.now();
-  if (firstUpdate) {
-    prevTotalUp = totalUp;
-    prevTotalDn = totalDn;
-    prevTime = now;
-    firstUpdate = false;
-    return;
-  }
-  const dt = (now - prevTime) / 1000;
-  if (dt > 0.5) {
-    const upSpeed = Math.max(0, (totalUp - prevTotalUp) / dt);
-    const dnSpeed = Math.max(0, (totalDn - prevTotalDn) / dt);
-    document.getElementById('ov-speed-up').textContent = fmtSpeed(upSpeed);
-    document.getElementById('ov-speed-down').textContent = fmtSpeed(dnSpeed);
-    prevTotalUp = totalUp;
-    prevTotalDn = totalDn;
-    prevTime = now;
+let prevTotalUp=0,prevTotalDn=0,prevTime=0,firstUpdate=true;
+function calcSpeed(totalUp,totalDn){
+  const now=Date.now();
+  if(firstUpdate){prevTotalUp=totalUp;prevTotalDn=totalDn;prevTime=now;firstUpdate=false;return}
+  const dt=(now-prevTime)/1000;
+  if(dt>0.5){
+    const upSpeed=Math.max(0,(totalUp-prevTotalUp)/dt);
+    const dnSpeed=Math.max(0,(totalDn-prevTotalDn)/dt);
+    document.getElementById('ov-speed-up').textContent=fmtSpeed(upSpeed);
+    document.getElementById('ov-speed-down').textContent=fmtSpeed(dnSpeed);
+    prevTotalUp=totalUp;prevTotalDn=totalDn;prevTime=now;
   }
 }
 
-// ========== 网络检测 ==========
-async function detectIP() {
-  try {
-    const r = await fetch('https://api.ipify.org?format=json');
-    const d = await r.json();
-    document.getElementById('ov-ip').textContent = d.ip;
-  } catch(e) {
-    document.getElementById('ov-ip').textContent = '检测失败';
-  }
+async function detectIP(){try{const r=await fetch('https://api.ipify.org?format=json');const d=await r.json();document.getElementById('ov-ip').textContent=d.ip}catch(e){document.getElementById('ov-ip').textContent='检测失败'}}
+async function detectExitInfo(){try{const r=await fetch('/api/exit-info');const d=await r.json();if(d.error){document.getElementById('ov-exit-ip').textContent='检测失败';document.getElementById('ov-colo').textContent='检测失败';return}document.getElementById('ov-exit-ip').textContent=d.exit_ip||'未知';document.getElementById('ov-colo').textContent=d.colo||'未知'}catch(e){document.getElementById('ov-exit-ip').textContent='检测失败';document.getElementById('ov-colo').textContent='检测失败'}}
+
+async function pingOne(url,timeout){const start=performance.now();try{await fetch(url,{mode:'no-cors',cache:'no-store',signal:AbortSignal.timeout(timeout)});return Math.round(performance.now()-start)}catch(e){return-1}}
+async function checkPing(){
+  const timeout=5000;
+  const [g,c,h]=await Promise.all([pingOne('https://www.google.com/generate_204',timeout),pingOne('https://1.1.1.1/cdn-cgi/trace',timeout),pingOne('https://github.com',timeout)]);
+  function set(id,ms){const el=document.getElementById(id);if(ms<0){el.textContent='超时';el.className='val slow';return}el.textContent=ms+'ms';el.className='val '+(ms<200?'fast':ms<500?'mid':'slow')}
+  set('ping-google',g);set('ping-cf',c);set('ping-gh',h);
+  const pings=[g,c,h].filter(p=>p>0);const avg=pings.length>0?Math.round(pings.reduce((a,b)=>a+b,0)/pings.length):-1;
+  document.getElementById('ov-ping').textContent=avg>0?'平均 '+avg+'ms':'无法检测';
 }
 
-async function detectExitInfo() {
-  try {
-    const r = await fetch('/api/exit-info');
-    const d = await r.json();
-    if (d.error) {
-      document.getElementById('ov-exit-ip').textContent = '检测失败';
-      document.getElementById('ov-colo').textContent = '检测失败';
-      return;
-    }
-    document.getElementById('ov-exit-ip').textContent = d.exit_ip || '未知';
-    document.getElementById('ov-colo').textContent = d.colo || '未知';
-  } catch(e) {
-    document.getElementById('ov-exit-ip').textContent = '检测失败';
-    document.getElementById('ov-colo').textContent = '检测失败';
-  }
+async function loadOverview(){
+  const [status,logs]=await Promise.all([api('/api/status'),api('/api/logs')]);
+  document.getElementById('ov-active').textContent=status.active_conns;
+  document.getElementById('ov-total-up').textContent=fmtBytes(status.total_upload);
+  document.getElementById('ov-total-down').textContent=fmtBytes(status.total_download);
+  document.getElementById('ov-mem').textContent=status.memory_mb.toFixed(1)+' MB';
+  calcSpeed(status.total_upload,status.total_download);
+  const logEl=document.getElementById('ov-logs');
+  if(!logs||logs.length===0){logEl.innerHTML='<div class="empty">暂无日志</div>';return}
+  logEl.innerHTML=logs.map(l=>{const cls=l.level==='error'?'level-error':l.level==='warn'?'level-warn':'level-info';return`<div class="log-line"><span class="time">${l.time}</span> <span class="${cls}">[${l.level}]</span> ${escHtml(l.msg)}</div>`}).join('');
+  logEl.scrollTop=logEl.scrollHeight;
+  detectIP();detectExitInfo();checkPing();
 }
 
-async function pingOne(url, timeout) {
-  const start = performance.now();
-  try {
-    await fetch(url, {mode:'no-cors', cache:'no-store', signal: AbortSignal.timeout(timeout)});
-    return Math.round(performance.now() - start);
-  } catch(e) {
-    return -1;
-  }
+let connSortBy='start_time',connSortOrder='desc';
+function updateSortArrows(){document.querySelectorAll('#page-connections th.sortable').forEach(th=>{th.classList.remove('sort-asc','sort-desc');if(th.dataset.sort===connSortBy)th.classList.add(connSortOrder==='asc'?'sort-asc':'sort-desc')})}
+document.querySelectorAll('#page-connections th.sortable').forEach(th=>{th.addEventListener('click',()=>{const col=th.dataset.sort;if(connSortBy===col)connSortOrder=connSortOrder==='asc'?'desc':'asc';else{connSortBy=col;connSortOrder='asc'}loadConnections()})});
+
+async function loadConnections(){
+  const search=document.getElementById('conn-search').value.trim();
+  let url='/api/connections?sort='+encodeURIComponent(connSortBy)+'&order='+connSortOrder;
+  if(search)url+='&search='+encodeURIComponent(search);
+  const conns=await api(url);
+  const tbody=document.getElementById('conn-table');updateSortArrows();
+  if(!conns||conns.length===0){tbody.innerHTML='<tr><td colspan="8" class="empty">暂无活跃连接</td></tr>';return}
+  tbody.innerHTML=conns.map(c=>{const modeCls=c.mode.startsWith('sock')?'sock':'http';return`<tr><td class="mono">${c.id}</td><td class="mono">${escHtml(c.source)}</td><td class="mono">${escHtml(c.target)}</td><td><span class="tag ${modeCls}">${c.mode}</span></td><td><span class="tag ${c.rule}">${c.rule==='direct'?'直连':'代理'}</span></td><td class="mono">${fmtBytes(c.upload||0)}</td><td class="mono">${fmtBytes(c.download||0)}</td><td>${new Date(c.start_time).toLocaleTimeString()}</td></tr>`}).join('');
 }
 
-async function checkPing() {
-  const timeout = 5000;
-  const [g, c, h] = await Promise.all([
-    pingOne('https://www.google.com/generate_204', timeout),
-    pingOne('https://1.1.1.1/cdn-cgi/trace', timeout),
-    pingOne('https://github.com', timeout)
-  ]);
+let directDomains=[],proxyDomains=[];
+async function loadRules(){const rules=await api('/api/rules');directDomains=[];proxyDomains=[];(rules||[]).forEach(r=>{if(r.type==='domain'){if(r.action==='direct')directDomains.push(r.value);else proxyDomains.push(r.value)}});renderDomains('direct');renderDomains('proxy')}
+function renderDomains(type){const list=type==='direct'?directDomains:proxyDomains;const tbody=document.getElementById(type+'-table');if(list.length===0){tbody.innerHTML='<tr><td colspan="2" class="empty">暂无规则</td></tr>';return}tbody.innerHTML=list.map((d,i)=>`<tr><td class="mono">${escHtml(d)}</td><td><button class="btn btn-ghost btn-sm" onclick="removeDomain('${type}',${i})">✕</button></td></tr>`).join('')}
+function addDomain(type){const input=document.getElementById(type+'-input');const domain=input.value.trim();if(!domain)return;const list=type==='direct'?directDomains:proxyDomains;if(list.includes(domain)){input.value='';return}list.push(domain);input.value='';renderDomains(type)}
+function removeDomain(type,idx){const list=type==='direct'?directDomains:proxyDomains;list.splice(idx,1);renderDomains(type)}
+async function saveRules(){const rules=[];directDomains.forEach(d=>rules.push({type:'domain',value:d,action:'direct'}));proxyDomains.forEach(d=>rules.push({type:'domain',value:d,action:'proxy'}));await api('/api/rules',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(rules)});toast('规则已保存')}
 
-  function setPing(id, ms) {
-    const el = document.getElementById(id);
-    if (ms < 0) { el.textContent = '超时'; el.className = 'value slow'; return; }
-    el.textContent = ms + 'ms';
-    el.className = ms < 200 ? 'value fast' : ms < 500 ? 'value mid' : 'value slow';
-  }
-  setPing('ping-google', g);
-  setPing('ping-cf', c);
-  setPing('ping-gh', h);
+async function loadConfig(){const c=await api('/api/config');document.getElementById('cfg-listen').value=c.listen_addr;document.getElementById('cfg-server').value=c.server_addr;document.getElementById('cfg-serverip').value=c.server_ip;document.getElementById('cfg-token').value=c.token;document.getElementById('cfg-dns').value=c.dns_server;document.getElementById('cfg-ech').value=c.ech_domain;document.getElementById('cfg-routing').value=c.routing_mode;document.getElementById('cfg-proxyip').value=c.proxy_ip||'';document.getElementById('cfg-web').value=c.web_addr}
+async function saveConfig(){await api('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({dns_server:document.getElementById('cfg-dns').value,ech_domain:document.getElementById('cfg-ech').value,proxy_ip:document.getElementById('cfg-proxyip').value,routing_mode:document.getElementById('cfg-routing').value})});toast('配置已保存，ECH 已刷新');loadConfig()}
+async function refreshECH(){const r=await api('/api/service/refresh-ech',{method:'POST'});toast(r.message||r.error);loadOverview()}
 
-  const pings = [g, c, h].filter(p => p > 0);
-  const avg = pings.length > 0 ? Math.round(pings.reduce((a,b)=>a+b,0)/pings.length) : -1;
-  document.getElementById('ov-ping').textContent = avg > 0 ? '平均: ' + avg + 'ms' : '无法检测';
-}
-
-// ========== 概览 ==========
-async function loadOverview() {
-  const [status, logs] = await Promise.all([api('/api/status'), api('/api/logs')]);
-
-  const modes = {'global':'全局代理','bypass_cn':'跳过中国大陆','none':'不改变（直连）','custom':'自定义规则'};
-  document.getElementById('ov-active').textContent = status.active_conns;
-  document.getElementById('ov-total-up').textContent = fmtBytes(status.total_upload);
-  document.getElementById('ov-total-down').textContent = fmtBytes(status.total_download);
-  document.getElementById('ov-mem').textContent = status.memory_mb.toFixed(1) + ' MB';
-  document.getElementById('ov-mode') && (document.getElementById('ov-mode').textContent = modes[status.routing_mode] || status.routing_mode);
-
-  calcSpeed(status.total_upload, status.total_download);
-
-  const logEl = document.getElementById('ov-logs');
-  if (!logs || logs.length === 0) {
-    logEl.innerHTML = '<div class="empty">暂无日志</div>';
-    return;
-  }
-  logEl.innerHTML = logs.map(l => {
-    const cls = l.level === 'error' ? 'level-error' : l.level === 'warn' ? 'level-warn' : 'level-info';
-    return `<div class="log-line"><span class="time">${l.time}</span> <span class="${cls}">[${l.level}]</span> ${escHtml(l.msg)}</div>`;
-  }).join('');
-  logEl.scrollTop = logEl.scrollHeight;
-
-  detectIP();
-  detectExitInfo();
-  checkPing();
-}
-
-// ========== 连接 ==========
-let connSortBy = 'start_time';
-let connSortOrder = 'desc';
-
-function updateSortArrows() {
-  document.querySelectorAll('#page-connections th.sortable').forEach(th => {
-    th.classList.remove('sort-asc', 'sort-desc');
-    if (th.dataset.sort === connSortBy) {
-      th.classList.add(connSortOrder === 'asc' ? 'sort-asc' : 'sort-desc');
-    }
-  });
-}
-
-document.querySelectorAll('#page-connections th.sortable').forEach(th => {
-  th.addEventListener('click', () => {
-    const col = th.dataset.sort;
-    if (connSortBy === col) {
-      connSortOrder = connSortOrder === 'asc' ? 'desc' : 'asc';
-    } else {
-      connSortBy = col;
-      connSortOrder = 'asc';
-    }
-    loadConnections();
-  });
-});
-
-async function loadConnections() {
-  const search = document.getElementById('conn-search').value.trim();
-  let url = '/api/connections?sort=' + encodeURIComponent(connSortBy) + '&order=' + connSortOrder;
-  if (search) url += '&search=' + encodeURIComponent(search);
-  const conns = await api(url);
-  const tbody = document.getElementById('conn-table');
-  updateSortArrows();
-  if (!conns || conns.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="8" class="empty">暂无活跃连接</td></tr>';
-    return;
-  }
-  tbody.innerHTML = conns.map(c => {
-    const modeCls = c.mode.startsWith('sock') ? 'sock' : 'http';
-    return `<tr>
-      <td class="mono">${c.id}</td>
-      <td class="mono">${escHtml(c.source)}</td>
-      <td class="mono">${escHtml(c.target)}</td>
-      <td><span class="tag ${modeCls}">${c.mode}</span></td>
-      <td><span class="tag ${c.rule}">${c.rule === 'direct' ? '直连' : '代理'}</span></td>
-      <td class="mono">${fmtBytes(c.upload || 0)}</td>
-      <td class="mono">${fmtBytes(c.download || 0)}</td>
-      <td>${new Date(c.start_time).toLocaleTimeString()}</td>
-    </tr>`;
-  }).join('');
-}
-
-// ========== 规则 ==========
-let directDomains = [];
-let proxyDomains = [];
-
-async function loadRules() {
-  const rules = await api('/api/rules');
-  directDomains = [];
-  proxyDomains = [];
-  (rules || []).forEach(r => {
-    if (r.type === 'domain') {
-      if (r.action === 'direct') directDomains.push(r.value);
-      else proxyDomains.push(r.value);
-    }
-  });
-  renderDomains('direct');
-  renderDomains('proxy');
-}
-
-function renderDomains(type) {
-  const list = type === 'direct' ? directDomains : proxyDomains;
-  const tbody = document.getElementById(type + '-table');
-  if (list.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="2" class="empty">暂无规则</td></tr>';
-    return;
-  }
-  tbody.innerHTML = list.map((d, i) => `<tr>
-    <td class="mono">${escHtml(d)}</td>
-    <td><button class="btn btn-sm" onclick="removeDomain('${type}',${i})" style="color:var(--red);border:none;padding:2px 6px">✕</button></td>
-  </tr>`).join('');
-}
-
-function addDomain(type) {
-  const input = document.getElementById(type + '-input');
-  const domain = input.value.trim();
-  if (!domain) return;
-  const list = type === 'direct' ? directDomains : proxyDomains;
-  if (list.includes(domain)) { input.value = ''; return; }
-  list.push(domain);
-  input.value = '';
-  renderDomains(type);
-}
-
-function removeDomain(type, idx) {
-  const list = type === 'direct' ? directDomains : proxyDomains;
-  list.splice(idx, 1);
-  renderDomains(type);
-}
-
-async function saveRules() {
-  const rules = [];
-  directDomains.forEach(d => rules.push({type:'domain', value:d, action:'direct'}));
-  proxyDomains.forEach(d => rules.push({type:'domain', value:d, action:'proxy'}));
-  await api('/api/rules', {
-    method: 'POST',
-    headers: {'Content-Type':'application/json'},
-    body: JSON.stringify(rules)
-  });
-  alert('规则已保存');
-}
-
-// ========== 配置 ==========
-async function loadConfig() {
-  const c = await api('/api/config');
-  document.getElementById('cfg-listen').value = c.listen_addr;
-  document.getElementById('cfg-server').value = c.server_addr;
-  document.getElementById('cfg-serverip').value = c.server_ip;
-  document.getElementById('cfg-token').value = c.token;
-  document.getElementById('cfg-dns').value = c.dns_server;
-  document.getElementById('cfg-ech').value = c.ech_domain;
-  document.getElementById('cfg-routing').value = c.routing_mode;
-  document.getElementById('cfg-proxyip').value = c.proxy_ip || '';
-  document.getElementById('cfg-web').value = c.web_addr;
-}
-
-async function saveConfig() {
-  await api('/api/config', {
-    method: 'POST',
-    headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({
-      dns_server: document.getElementById('cfg-dns').value,
-      ech_domain: document.getElementById('cfg-ech').value,
-      proxy_ip: document.getElementById('cfg-proxyip').value,
-      routing_mode: document.getElementById('cfg-routing').value
-    })
-  });
-  alert('配置已保存，ECH 已刷新');
-  loadConfig();
-}
-
-async function refreshECH() {
-  const r = await api('/api/service/refresh-ech', { method: 'POST' });
-  alert(r.message || r.error);
-  loadOverview();
-}
-
-// WebSocket 实时更新
 let ws;
-function connectWS() {
-  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  ws = new WebSocket(`${proto}//${location.host}/ws`);
-  ws.onmessage = (e) => {
-    try {
-      const d = JSON.parse(e.data);
-      document.getElementById('ov-active').textContent = d.active_conns;
-      document.getElementById('ov-total-up').textContent = fmtBytes(d.total_upload);
-      document.getElementById('ov-total-down').textContent = fmtBytes(d.total_download);
-      document.getElementById('ov-mem').textContent = d.memory_mb.toFixed(1) + ' MB';
-      calcSpeed(d.total_upload, d.total_download);
-    } catch(ex) {}
-  };
-  ws.onclose = () => setTimeout(connectWS, 3000);
-}
-
-// 初始化
+function connectWS(){const proto=location.protocol==='https:'?'wss:':'ws:';ws=new WebSocket(`${proto}//${location.host}/ws`);ws.onmessage=(e)=>{try{const d=JSON.parse(e.data);document.getElementById('ov-active').textContent=d.active_conns;document.getElementById('ov-total-up').textContent=fmtBytes(d.total_upload);document.getElementById('ov-total-down').textContent=fmtBytes(d.total_download);document.getElementById('ov-mem').textContent=d.memory_mb.toFixed(1)+' MB';calcSpeed(d.total_upload,d.total_download)}catch(ex){}};ws.onclose=()=>setTimeout(connectWS,3000)}
 connectWS();
 </script>
 </body>
