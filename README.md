@@ -12,6 +12,8 @@
 - 简化的分流规则（直连域名 / 代理域名）
 - 出口 IP 和 CF 落地节点（COLO）自动检测
 - 固定出口 IP（ProxyIP）支持
+- 配置持久化（config.json），重启不丢失
+- 规则持久化（rules.json），重启不丢失
 - 日志实时查看
 - 内存使用监控
 
@@ -23,7 +25,7 @@
 docker pull ghcr.io/dirige/ech-proxy-panel:latest
 ```
 
-### 运行
+### 首次部署
 
 ```bash
 docker run -d \
@@ -40,7 +42,7 @@ docker run -d \
   -routing global
 ```
 
-首次运行后，配置会自动保存到 `/data/config.json`。之后重启容器无需再传参数：
+首次运行后配置自动保存，后续重启直接：
 
 ```bash
 docker restart ech-proxy
@@ -59,7 +61,6 @@ docker restart ech-proxy
 | `-dns` | 否 | DoH 服务器 | `-dns dns.alidns.com/dns-query` |
 | `-ech` | 否 | ECH 域名 | `-ech cloudflare-ech.com` |
 | `-proxyip` | 否 | 固定出口 IP | `-proxyip 101.79.165.113:443` |
-| `-rules` | 否 | 自定义规则文件（routing=custom 时需要） | `-rules /etc/rules.txt` |
 
 ### 分流模式
 
@@ -70,9 +71,15 @@ docker restart ech-proxy
 | `none` | 不改变（直连） |
 | `custom` | 自定义规则（需配合 `-rules` 参数） |
 
-### 固定出口 IP
+## 爱快 Docker 部署（桥接模式）
 
-如果需要固定出口 IP（例如固定到某个香港节点），使用 `-proxyip` 参数：
+### 步骤 1：拉取镜像
+
+```bash
+docker pull ghcr.io/dirige/ech-proxy-panel:latest
+```
+
+### 步骤 2：首次部署（传参数）
 
 ```bash
 docker run -d \
@@ -80,15 +87,71 @@ docker run -d \
   --restart always \
   -p 9090:9090 \
   -p 30000:30000 \
+  -v ech-data:/data \
   ghcr.io/dirige/ech-proxy-panel:latest \
   -l 0.0.0.0:30000 \
   -f 你的服务地址:443 \
   -token 你的令牌 \
   -web :9090 \
-  -proxyip 101.79.165.113:443
+  -routing global
 ```
 
-留空则使用自动就近分配。
+### 步骤 3：后续重启
+
+配置已保存，无需再传参数：
+
+```bash
+docker restart ech-proxy
+```
+
+### 步骤 4：修改配置
+
+**方式一：Web 面板**
+
+浏览器打开 `http://爱快IP:9090`，在「配置」页面修改，点保存。
+
+**方式二：手动编辑配置文件**
+
+```bash
+docker exec -it ech-proxy vi /data/config.json
+docker restart ech-proxy
+```
+
+### 配置文件模板
+
+`/data/config.json`：
+
+```json
+{
+  "listen_addr": "0.0.0.0:30000",
+  "server_addr": "你的服务地址:443",
+  "server_ip": "172.64.229.240",
+  "token": "你的令牌",
+  "dns_server": "dns.alidns.com/dns-query",
+  "ech_domain": "cloudflare-ech.com",
+  "routing_mode": "global",
+  "web_addr": ":9090",
+  "proxy_ip": ""
+}
+```
+
+字段说明：
+
+| 字段 | 说明 | 示例 |
+|------|------|------|
+| `listen_addr` | 代理监听地址 | `0.0.0.0:30000` |
+| `server_addr` | 服务端地址 | `xxx.workers.dev:443` |
+| `server_ip` | 优选 IP（留空自动分配） | `172.64.229.240` |
+| `token` | 认证令牌 | `your-token` |
+| `dns_server` | DoH 服务器 | `dns.alidns.com/dns-query` |
+| `ech_domain` | ECH 域名 | `cloudflare-ech.com` |
+| `routing_mode` | 分流模式 | `global` / `bypass_cn` / `none` / `custom` |
+| `web_addr` | 管理面板端口 | `:9090` |
+| `proxy_ip` | 固定出口 IP（留空自动分配） | `101.79.165.113:443` |
+
+### 固定出口 IP
+
+在 config.json 中设置 `proxy_ip` 字段，或在 Web 面板「配置」页面修改。
 
 ### 自定义规则文件
 
@@ -102,7 +165,7 @@ domain,github.com,proxy
 
 格式：`domain,域名,动作`（动作：`direct` 直连 / `proxy` 代理）
 
-然后挂载到容器：
+挂载到容器：
 
 ```bash
 docker run -d \
@@ -110,6 +173,7 @@ docker run -d \
   --restart always \
   -p 9090:9090 \
   -p 30000:30000 \
+  -v ech-data:/data \
   -v /path/to/rules.txt:/etc/rules.txt \
   ghcr.io/dirige/ech-proxy-panel:latest \
   -l 0.0.0.0:30000 \
