@@ -1,0 +1,14 @@
+.git
+.github
+*.md
+gui.py
+gui.spec
+requirements.txt
+softrouter.sh
+config.json
+chn_ip.txt
+chn_ipv6.txt
+rules_data.txt
+ech-workers
+ech-workers-*
+*.log

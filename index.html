@@ -37,7 +37,11 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 .table-wrap{background:var(--bg-card);border:1px solid var(--border);border-radius:8px;overflow:hidden;margin-bottom:16px}
 .table{width:100%;border-collapse:collapse}
 .table th,.table td{padding:8px 12px;text-align:left;font-size:13px;border-bottom:1px solid var(--border)}
-.table th{background:var(--bg);color:var(--text-sec);font-weight:600;font-size:12px}
+.table th{background:var(--bg);color:var(--text-sec);font-weight:600;font-size:12px;cursor:pointer;user-select:none;white-space:nowrap}
+.table th.sortable:hover{color:var(--accent)}
+.table th .sort-arrow{font-size:10px;opacity:.5}
+.table th.sort-asc .sort-arrow::after{content:' ▲';opacity:1;color:var(--accent)}
+.table th.sort-desc .sort-arrow::after{content:' ▼';opacity:1;color:var(--accent)}
 .table tr:hover td{background:var(--bg-hover)}
 .table .mono{font-family:'SF Mono',Consolas,monospace;font-size:12px}
 .table .tag{display:inline-block;padding:2px 8px;border-radius:12px;font-size:11px;font-weight:600}
@@ -156,11 +160,23 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
   <!-- 连接 -->
   <div class="page" id="page-connections">
     <h2 class="page-title">活跃连接</h2>
-    <div class="actions"><button class="btn" onclick="loadConnections()">刷新</button></div>
+    <div class="actions">
+      <input id="conn-search" placeholder="搜索 ID、来源、目标、模式、规则..." style="flex:1;max-width:400px;padding:8px 12px;background:var(--bg-input);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px" oninput="loadConnections()">
+      <button class="btn" onclick="loadConnections()">刷新</button>
+    </div>
     <div class="table-wrap">
       <table class="table">
-        <thead><tr><th>ID</th><th>来源</th><th>目标</th><th>模式</th><th>规则</th><th>开始时间</th></tr></thead>
-        <tbody id="conn-table"><tr><td colspan="6" class="empty">暂无活跃连接</td></tr></tbody>
+        <thead><tr>
+          <th class="sortable" data-sort="id">ID <span class="sort-arrow"></span></th>
+          <th class="sortable" data-sort="source">来源 <span class="sort-arrow"></span></th>
+          <th class="sortable" data-sort="target">目标 <span class="sort-arrow"></span></th>
+          <th class="sortable" data-sort="mode">模式 <span class="sort-arrow"></span></th>
+          <th class="sortable" data-sort="rule">规则 <span class="sort-arrow"></span></th>
+          <th class="sortable" data-sort="upload">上传 <span class="sort-arrow"></span></th>
+          <th class="sortable" data-sort="download">下载 <span class="sort-arrow"></span></th>
+          <th class="sortable" data-sort="start_time">开始时间 <span class="sort-arrow"></span></th>
+        </tr></thead>
+        <tbody id="conn-table"><tr><td colspan="8" class="empty">暂无活跃连接</td></tr></tbody>
       </table>
     </div>
   </div>
@@ -235,6 +251,20 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 </div>
 
 <script>
+// 连接页面自动刷新
+let connRefreshTimer = null;
+function startConnRefresh() {
+  stopConnRefresh();
+  connRefreshTimer = setInterval(() => {
+    if (document.getElementById('page-connections').classList.contains('active')) {
+      loadConnections();
+    }
+  }, 3000);
+}
+function stopConnRefresh() {
+  if (connRefreshTimer) { clearInterval(connRefreshTimer); connRefreshTimer = null; }
+}
+
 // 导航
 function switchPage(pg) {
   document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
@@ -243,9 +273,8 @@ function switchPage(pg) {
   document.getElementById('page-' + pg).classList.add('active');
   localStorage.setItem('ech_page', pg);
   if (pg === 'overview') loadOverview();
-  else if (pg === 'connections') loadConnections();
-  else if (pg === 'rules') loadRules();
-  else if (pg === 'config') loadConfig();
+  else if (pg === 'connections') { loadConnections(); startConnRefresh(); }
+  else { stopConnRefresh(); if (pg === 'rules') loadRules(); else if (pg === 'config') loadConfig(); }
 }
 
 document.querySelectorAll('.nav-item').forEach(el => {
@@ -398,11 +427,40 @@ async function loadOverview() {
 }
 
 // ========== 连接 ==========
+let connSortBy = 'start_time';
+let connSortOrder = 'desc';
+
+function updateSortArrows() {
+  document.querySelectorAll('#page-connections th.sortable').forEach(th => {
+    th.classList.remove('sort-asc', 'sort-desc');
+    if (th.dataset.sort === connSortBy) {
+      th.classList.add(connSortOrder === 'asc' ? 'sort-asc' : 'sort-desc');
+    }
+  });
+}
+
+document.querySelectorAll('#page-connections th.sortable').forEach(th => {
+  th.addEventListener('click', () => {
+    const col = th.dataset.sort;
+    if (connSortBy === col) {
+      connSortOrder = connSortOrder === 'asc' ? 'desc' : 'asc';
+    } else {
+      connSortBy = col;
+      connSortOrder = 'asc';
+    }
+    loadConnections();
+  });
+});
+
 async function loadConnections() {
-  const conns = await api('/api/connections');
+  const search = document.getElementById('conn-search').value.trim();
+  let url = '/api/connections?sort=' + encodeURIComponent(connSortBy) + '&order=' + connSortOrder;
+  if (search) url += '&search=' + encodeURIComponent(search);
+  const conns = await api(url);
   const tbody = document.getElementById('conn-table');
+  updateSortArrows();
   if (!conns || conns.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="6" class="empty">暂无活跃连接</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="8" class="empty">暂无活跃连接</td></tr>';
     return;
   }
   tbody.innerHTML = conns.map(c => {
@@ -413,6 +471,8 @@ async function loadConnections() {
       <td class="mono">${escHtml(c.target)}</td>
       <td><span class="tag ${modeCls}">${c.mode}</span></td>
       <td><span class="tag ${c.rule}">${c.rule === 'direct' ? '直连' : '代理'}</span></td>
+      <td class="mono">${fmtBytes(c.upload || 0)}</td>
+      <td class="mono">${fmtBytes(c.download || 0)}</td>
       <td>${new Date(c.start_time).toLocaleTimeString()}</td>
     </tr>`;
   }).join('');

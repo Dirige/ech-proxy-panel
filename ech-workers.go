@@ -68,6 +68,7 @@ var (
 	// 连接追踪
 	activeConns   sync.Map // key: connID(string) -> *connInfo
 	connIDCounter atomic.Int64
+	activeConnCnt atomic.Int64 // 活跃连接数（避免全量遍历）
 
 	// 流量统计
 	totalUpload   atomic.Int64
@@ -82,7 +83,16 @@ var (
 	// 自定义规则
 	customRules   []customRule
 	customRulesMu sync.RWMutex
+
+	// DNS 解析结果缓存（bypass_cn 模式下避免重复查询）
+	dnsCache   map[string]dnsCacheEntry
+	dnsCacheMu sync.RWMutex
 )
+
+type dnsCacheEntry struct {
+	ips       []net.IP
+	expiresAt time.Time
+}
 
 // ipRange 表示一个IPv4 IP范围
 type ipRange struct {
@@ -100,6 +110,18 @@ type ipRangeV6 struct {
 
 // connInfo 连接信息
 type connInfo struct {
+	ID        string
+	Source    string
+	Target    string
+	Mode      string
+	Rule      string
+	StartTime time.Time
+	upload    atomic.Int64
+	download  atomic.Int64
+}
+
+// connInfoResp 用于 JSON 序列化的连接信息（不含 atomic 字段）
+type connInfoResp struct {
 	ID        string    `json:"id"`
 	Source    string    `json:"source"`
 	Target    string    `json:"target"`
@@ -108,8 +130,6 @@ type connInfo struct {
 	Upload    int64     `json:"upload"`
 	Download  int64     `json:"download"`
 	StartTime time.Time `json:"start_time"`
-	upload    atomic.Int64
-	download  atomic.Int64
 }
 
 // logEntry 日志条目
@@ -169,14 +189,12 @@ func saveConfig(filePath string) error {
 	if err != nil {
 		return err
 	}
-	dir := filePath[:strings.LastIndex(filePath, "/")]
-	if dir == "" {
-		dir = filePath[:strings.LastIndex(filePath, "\\")]
+	if dir := filepath.Dir(filePath); dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return fmt.Errorf("创建配置目录失败: %w", err)
+		}
 	}
-	if dir != "" {
-		os.MkdirAll(dir, 0755)
-	}
-	return os.WriteFile(filePath, data, 0644)
+	return os.WriteFile(filePath, data, 0600)
 }
 
 // statusResponse 状态响应
@@ -270,6 +288,7 @@ func main() {
 	// 初始化统计
 	startTime = time.Now()
 	logBuffer = make([]logEntry, 0, 200)
+	dnsCache = make(map[string]dnsCacheEntry)
 
 	// 设置日志同时写入缓冲区
 	log.SetOutput(&logWriter{original: os.Stderr})
@@ -582,13 +601,9 @@ func loadChinaIPList() error {
 	}
 
 	// 按起始IP排序
-	for i := 0; i < len(ranges)-1; i++ {
-		for j := i + 1; j < len(ranges); j++ {
-			if ranges[i].start > ranges[j].start {
-				ranges[i], ranges[j] = ranges[j], ranges[i]
-			}
-		}
-	}
+	sort.Slice(ranges, func(i, j int) bool {
+		return ranges[i].start < ranges[j].start
+	})
 
 	chinaIPRangesMu.Lock()
 	chinaIPRanges = ranges
@@ -685,19 +700,46 @@ func loadChinaIPV6List() error {
 	}
 
 	// 按起始IP排序
-	for i := 0; i < len(ranges)-1; i++ {
-		for j := i + 1; j < len(ranges); j++ {
-			if compareIPv6(ranges[i].start, ranges[j].start) > 0 {
-				ranges[i], ranges[j] = ranges[j], ranges[i]
-			}
-		}
-	}
+	sort.Slice(ranges, func(i, j int) bool {
+		return compareIPv6(ranges[i].start, ranges[j].start) < 0
+	})
 
 	chinaIPV6RangesMu.Lock()
 	chinaIPV6Ranges = ranges
 	chinaIPV6RangesMu.Unlock()
 
 	return nil
+}
+
+// lookupIPWithCache 带缓存的 DNS 查询
+func lookupIPWithCache(host string) ([]net.IP, error) {
+	dnsCacheMu.RLock()
+	entry, ok := dnsCache[host]
+	dnsCacheMu.RUnlock()
+
+	if ok && time.Now().Before(entry.expiresAt) {
+		return entry.ips, nil
+	}
+
+	ips, err := net.LookupIP(host)
+	if err != nil {
+		return nil, err
+	}
+
+	dnsCacheMu.Lock()
+	dnsCache[host] = dnsCacheEntry{
+		ips:       ips,
+		expiresAt: time.Now().Add(5 * time.Minute), // 缓存 5 分钟
+	}
+	// 简单清理：超过 1000 条时清空
+	if len(dnsCache) > 1000 {
+		for k := range dnsCache {
+			delete(dnsCache, k)
+		}
+	}
+	dnsCacheMu.Unlock()
+
+	return ips, nil
 }
 
 // shouldBypassProxy 根据分流模式判断是否应该绕过代理（直连）
@@ -720,8 +762,8 @@ func shouldBypassProxy(targetHost string) bool {
 		if ip := net.ParseIP(targetHost); ip != nil {
 			return isChinaIP(targetHost)
 		}
-		// 如果是域名，先解析IP
-		ips, err := net.LookupIP(targetHost)
+		// 如果是域名，先解析IP（带缓存）
+		ips, err := lookupIPWithCache(targetHost)
 		if err != nil {
 			// 解析失败，默认走代理
 			return false
@@ -867,12 +909,10 @@ func saveCustomRules(filePath string) error {
 	customRulesMu.RUnlock()
 
 	// 确保目录存在
-	dir := filePath[:strings.LastIndex(filePath, "/")]
-	if dir == "" {
-		dir = filePath[:strings.LastIndex(filePath, "\\")]
-	}
-	if dir != "" {
-		os.MkdirAll(dir, 0755)
+	if dir := filepath.Dir(filePath); dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return fmt.Errorf("创建规则目录失败: %w", err)
+		}
 	}
 
 	file, err := os.Create(filePath)
@@ -896,48 +936,13 @@ func loadRulesDataFile() {
 	if _, err := os.Stat(rulesData); os.IsNotExist(err) {
 		return
 	}
-	if err := loadCustomRulesFromFile(rulesData); err != nil {
+	if err := loadCustomRules(rulesData); err != nil {
 		log.Printf("[规则] 加载面板规则失败: %v", err)
 	} else {
+		customRulesMu.RLock()
 		log.Printf("[规则] 已从面板规则文件加载 %d 条规则", len(customRules))
+		customRulesMu.RUnlock()
 	}
-}
-
-// loadCustomRulesFromFile 从文件加载规则到 customRules
-func loadCustomRulesFromFile(filePath string) error {
-	file, err := os.Open(filePath)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-
-	var rules []customRule
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "//") {
-			continue
-		}
-		parts := strings.SplitN(line, ",", 3)
-		if len(parts) != 3 {
-			continue
-		}
-		ruleType := strings.TrimSpace(parts[0])
-		value := strings.TrimSpace(parts[1])
-		action := strings.TrimSpace(parts[2])
-		if (ruleType == "domain" || ruleType == "ipcidr" || ruleType == "keyword") &&
-			(action == "proxy" || action == "direct") {
-			rules = append(rules, customRule{Type: ruleType, Value: value, Action: action})
-		}
-	}
-	if err := scanner.Err(); err != nil {
-		return err
-	}
-
-	customRulesMu.Lock()
-	customRules = rules
-	customRulesMu.Unlock()
-	return nil
 }
 
 // ======================== 连接追踪与流量统计 ========================
@@ -954,6 +959,7 @@ func addConn(source, target, mode, rule string) string {
 		StartTime: time.Now(),
 	}
 	activeConns.Store(id, info)
+	activeConnCnt.Add(1)
 	totalConns.Add(1)
 	return id
 }
@@ -961,6 +967,7 @@ func addConn(source, target, mode, rule string) string {
 // removeConn 移除连接追踪，将流量计入总统计
 func removeConn(id string) {
 	if v, ok := activeConns.LoadAndDelete(id); ok {
+		activeConnCnt.Add(-1)
 		info := v.(*connInfo)
 		up := info.upload.Load()
 		dn := info.download.Load()
@@ -970,14 +977,20 @@ func removeConn(id string) {
 }
 
 // getActiveConns 获取所有活跃连接
-func getActiveConns() []connInfo {
-	var conns []connInfo
+func getActiveConns() []connInfoResp {
+	var conns []connInfoResp
 	activeConns.Range(func(key, value interface{}) bool {
 		info := value.(*connInfo)
-		c := *info
-		c.Upload = info.upload.Load()
-		c.Download = info.download.Load()
-		conns = append(conns, c)
+		conns = append(conns, connInfoResp{
+			ID:        info.ID,
+			Source:    info.Source,
+			Target:    info.Target,
+			Mode:      info.Mode,
+			Rule:      info.Rule,
+			Upload:    info.upload.Load(),
+			Download:  info.download.Load(),
+			StartTime: info.StartTime,
+		})
 		return true
 	})
 	return conns
@@ -1049,7 +1062,7 @@ func handleStatus(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(statusResponse{
 		Uptime:        time.Since(startTime).Truncate(time.Second).String(),
 		TotalConns:    totalConns.Load(),
-		ActiveConns:   len(getActiveConns()),
+		ActiveConns:   int(activeConnCnt.Load()),
 		TotalUpload:   totalUpload.Load(),
 		TotalDownload: totalDownload.Load(),
 		RoutingMode:   routingMode,
@@ -1158,10 +1171,63 @@ func handleRules(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
-// handleConnections 获取活跃连接
+// handleConnections 获取活跃连接（支持搜索和排序）
 func handleConnections(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(getActiveConns())
+
+	conns := getActiveConns()
+
+	// 搜索过滤
+	search := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("search")))
+	if search != "" {
+		var filtered []connInfoResp
+		for _, c := range conns {
+			if strings.Contains(strings.ToLower(c.ID), search) ||
+				strings.Contains(strings.ToLower(c.Source), search) ||
+				strings.Contains(strings.ToLower(c.Target), search) ||
+				strings.Contains(strings.ToLower(c.Mode), search) ||
+				strings.Contains(strings.ToLower(c.Rule), search) {
+				filtered = append(filtered, c)
+			}
+		}
+		conns = filtered
+	}
+
+	// 排序
+	sortBy := r.URL.Query().Get("sort")
+	sortOrder := r.URL.Query().Get("order") // "asc" or "desc", default asc
+	if sortBy != "" {
+		desc := sortOrder == "desc"
+		sort.Slice(conns, func(i, j int) bool {
+			var less bool
+			switch sortBy {
+			case "id":
+				less = conns[i].ID < conns[j].ID
+			case "source":
+				less = conns[i].Source < conns[j].Source
+			case "target":
+				less = conns[i].Target < conns[j].Target
+			case "mode":
+				less = conns[i].Mode < conns[j].Mode
+			case "rule":
+				less = conns[i].Rule < conns[j].Rule
+			case "upload":
+				less = conns[i].Upload < conns[j].Upload
+			case "download":
+				less = conns[i].Download < conns[j].Download
+			case "start_time":
+				less = conns[i].StartTime.Before(conns[j].StartTime)
+			default:
+				less = conns[i].StartTime.Before(conns[j].StartTime)
+			}
+			if desc {
+				return !less
+			}
+			return less
+		})
+	}
+
+	json.NewEncoder(w).Encode(conns)
 }
 
 // handleTraffic 获取流量统计
@@ -1385,6 +1451,10 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 
+	// 用于计算实时速度
+	var prevUp, prevDn int64
+	firstTick := true
+
 	for {
 		select {
 		case <-ticker.C:
@@ -1396,16 +1466,36 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 				rtDn += info.download.Load()
 				return true
 			})
+
+			// 计算增量速度（总上传/下载 - 上次值）
+			curUp := totalUpload.Load() + rtUp
+			curDn := totalDownload.Load() + rtDn
+			speedUp := int64(0)
+			speedDn := int64(0)
+			if !firstTick {
+				speedUp = curUp - prevUp
+				speedDn = curDn - prevDn
+				if speedUp < 0 {
+					speedUp = 0
+				}
+				if speedDn < 0 {
+					speedDn = 0
+				}
+			}
+			firstTick = false
+			prevUp = curUp
+			prevDn = curDn
+
 			var m runtime.MemStats
 			runtime.ReadMemStats(&m)
 			data := map[string]interface{}{
-				"active_conns":  len(getActiveConns()),
-				"total_upload":  totalUpload.Load(),
-				"total_download": totalDownload.Load(),
-				"rt_upload":     rtUp,
-				"rt_download":   rtDn,
-				"uptime":        time.Since(startTime).Seconds(),
-				"memory_mb":     float64(m.Alloc) / 1024 / 1024,
+				"active_conns":   activeConnCnt.Load(),
+				"total_upload":   curUp,
+				"total_download": curDn,
+				"rt_upload":      speedUp,
+				"rt_download":    speedDn,
+				"uptime":         time.Since(startTime).Seconds(),
+				"memory_mb":      float64(m.Alloc) / 1024 / 1024,
 			}
 			if err := conn.WriteJSON(data); err != nil {
 				return
@@ -1419,6 +1509,16 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 // ======================== ECH 支持 ========================
 
 const typeHTTPS = 65
+
+// 全局 HTTP 客户端，复用 TCP 连接
+var dohHTTPClient = &http.Client{
+	Timeout: 10 * time.Second,
+	Transport: &http.Transport{
+		MaxIdleConns:        10,
+		IdleConnTimeout:     90 * time.Second,
+		TLSHandshakeTimeout: 10 * time.Second,
+	},
+}
 
 func prepareECH() error {
 	echBase64, err := queryHTTPSRecord(echDomain, dnsServer)
@@ -1531,8 +1631,7 @@ func queryDoH(domain, dohURL string) (string, error) {
 	req.Header.Set("Accept", "application/dns-message")
 	req.Header.Set("Content-Type", "application/dns-message")
 
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := dohHTTPClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("DoH 请求失败: %v", err)
 	}
@@ -1845,6 +1944,14 @@ func handleConnection(conn net.Conn) {
 	defer conn.Close()
 
 	clientAddr := conn.RemoteAddr().String()
+
+	// 启用 TCP_NODELAY 降低延迟，对视频流等交互式流量重要
+	if tcpConn, ok := conn.(*net.TCPConn); ok {
+		tcpConn.SetNoDelay(true)
+		tcpConn.SetReadBuffer(256 * 1024)
+		tcpConn.SetWriteBuffer(256 * 1024)
+	}
+
 	conn.SetDeadline(time.Now().Add(30 * time.Second))
 
 	// 读取第一个字节判断协议
@@ -2301,20 +2408,38 @@ func handleTunnel(conn net.Conn, target, clientAddr string, mode int, firstFrame
 		sendErrorResponse(conn, mode)
 		return err
 	}
-	defer wsConn.Close()
 
 	var mu sync.Mutex
+	closed := false
+	closeOnce := sync.Once{}
+	cleanup := func() {
+		closeOnce.Do(func() {
+			closed = true
+			wsConn.Close()
+			conn.Close()
+		})
+	}
+	defer cleanup()
 
-	// 保活
-	stopPing := make(chan bool)
+	// 保活 + WebSocket 读取超时管理
+	// 设置读取超时为 60s，每次收到数据或 pong 时重置
+	wsConn.SetReadDeadline(time.Now().Add(60 * time.Second))
+	wsConn.SetPongHandler(func(string) error {
+		wsConn.SetReadDeadline(time.Now().Add(60 * time.Second))
+		return nil
+	})
+
+	stopPing := make(chan struct{})
 	go func() {
-		ticker := time.NewTicker(10 * time.Second)
+		ticker := time.NewTicker(15 * time.Second)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-ticker.C:
 				mu.Lock()
-				wsConn.WriteMessage(websocket.PingMessage, nil)
+				if !closed {
+					wsConn.WriteMessage(websocket.PingMessage, nil)
+				}
 				mu.Unlock()
 			case <-stopPing:
 				return
@@ -2328,7 +2453,7 @@ func handleTunnel(conn net.Conn, target, clientAddr string, mode int, firstFrame
 	// 如果没有预设的 firstFrame，尝试读取第一帧数据（仅 SOCKS5）
 	if firstFrame == "" && mode == modeSOCKS5 {
 		_ = conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
-		buffer := make([]byte, 32768)
+		buffer := make([]byte, 65536)
 		n, _ := conn.Read(buffer)
 		_ = conn.SetReadDeadline(time.Time{})
 		if n > 0 {
@@ -2376,18 +2501,23 @@ func handleTunnel(conn net.Conn, target, clientAddr string, mode int, firstFrame
 	log.Printf("[代理] %s 已连接: %s", clientAddr, target)
 
 	// 双向转发
-	done := make(chan bool, 2)
+	done := make(chan struct{}, 2)
 
 	// Client -> Server
 	go func() {
-		buf := make([]byte, 32768)
+		buf := make([]byte, 65536)
 		for {
 			n, err := conn.Read(buf)
 			if err != nil {
+				if !isNormalCloseError(err) {
+					log.Printf("[代理] %s 客户端读取错误: %v", clientAddr, err)
+				}
 				mu.Lock()
-				wsConn.WriteMessage(websocket.TextMessage, []byte("CLOSE"))
+				if !closed {
+					wsConn.WriteMessage(websocket.TextMessage, []byte("CLOSE"))
+				}
 				mu.Unlock()
-				done <- true
+				done <- struct{}{}
 				return
 			}
 
@@ -2397,7 +2527,7 @@ func handleTunnel(conn net.Conn, target, clientAddr string, mode int, firstFrame
 			err = wsConn.WriteMessage(websocket.BinaryMessage, buf[:n])
 			mu.Unlock()
 			if err != nil {
-				done <- true
+				done <- struct{}{}
 				return
 			}
 		}
@@ -2408,27 +2538,41 @@ func handleTunnel(conn net.Conn, target, clientAddr string, mode int, firstFrame
 		for {
 			mt, msg, err := wsConn.ReadMessage()
 			if err != nil {
-				done <- true
+				if !isNormalCloseError(err) {
+					log.Printf("[代理] %s WebSocket 读取错误: %v", clientAddr, err)
+				}
+				done <- struct{}{}
 				return
 			}
 
+			// 收到数据，重置读取超时
+			wsConn.SetReadDeadline(time.Now().Add(60 * time.Second))
+
 			if mt == websocket.TextMessage {
 				if string(msg) == "CLOSE" {
-					done <- true
+					done <- struct{}{}
 					return
 				}
 			}
 
 			connInfoPtr.download.Add(int64(len(msg)))
 
-			if _, err := conn.Write(msg); err != nil {
-				done <- true
-				return
+			// 使用 io.WriteString 风格的完整写入，避免部分写入
+			written := 0
+			for written < len(msg) {
+				n, err := conn.Write(msg[written:])
+				if err != nil {
+					done <- struct{}{}
+					return
+				}
+				written += n
 			}
 		}
 	}()
 
 	<-done
+	// 一方结束，主动关闭连接释放另一方的阻塞
+	cleanup()
 	removeConn(connID)
 	log.Printf("[代理] %s 已断开: %s", clientAddr, target)
 	return nil
@@ -2468,7 +2612,24 @@ func handleDirectConnection(conn net.Conn, target, clientAddr string, mode int, 
 		sendErrorResponse(conn, mode)
 		return fmt.Errorf("直连失败: %w", err)
 	}
-	defer targetConn.Close()
+
+	// 对直连目标也启用 TCP_NODELAY
+	if tcpConn, ok := targetConn.(*net.TCPConn); ok {
+		tcpConn.SetNoDelay(true)
+		tcpConn.SetReadBuffer(256 * 1024)
+		tcpConn.SetWriteBuffer(256 * 1024)
+	}
+
+	closeOnce := sync.Once{}
+	cleanup := func() {
+		closeOnce.Do(func() {
+			targetConn.Close()
+			conn.Close()
+		})
+	}
+	defer cleanup()
+
+	conn.SetDeadline(time.Time{})
 
 	// 发送成功响应
 	if err := sendSuccessResponse(conn, mode); err != nil {
@@ -2478,44 +2639,68 @@ func handleDirectConnection(conn net.Conn, target, clientAddr string, mode int, 
 
 	// 如果有预设的第一帧数据，先发送
 	if firstFrame != "" {
-		if _, err := targetConn.Write([]byte(firstFrame)); err != nil {
-			removeConn(connID)
-			return err
+		data := []byte(firstFrame)
+		written := 0
+		for written < len(data) {
+			n, err := targetConn.Write(data[written:])
+			if err != nil {
+				removeConn(connID)
+				return err
+			}
+			written += n
 		}
 	}
 
 	// 双向转发
-	done := make(chan bool, 2)
+	done := make(chan struct{}, 2)
 
 	// Client -> Target
 	go func() {
-		buf := make([]byte, 32768)
+		buf := make([]byte, 65536)
 		for {
 			n, err := conn.Read(buf)
 			if err != nil {
-				done <- true
+				done <- struct{}{}
 				return
 			}
 			connInfoPtr.upload.Add(int64(n))
-			targetConn.Write(buf[:n])
+			written := 0
+			for written < n {
+				m, err := targetConn.Write(buf[written:n])
+				if err != nil {
+					done <- struct{}{}
+					return
+				}
+				written += m
+			}
 		}
 	}()
 
 	// Target -> Client
 	go func() {
-		buf := make([]byte, 32768)
+		buf := make([]byte, 65536)
 		for {
 			n, err := targetConn.Read(buf)
 			if err != nil {
-				done <- true
+				done <- struct{}{}
 				return
 			}
 			connInfoPtr.download.Add(int64(n))
-			conn.Write(buf[:n])
+			written := 0
+			for written < n {
+				m, err := conn.Write(buf[written:n])
+				if err != nil {
+					done <- struct{}{}
+					return
+				}
+				written += m
+			}
 		}
 	}()
 
 	<-done
+	// 一方结束，关闭双方连接释放另一方阻塞
+	cleanup()
 	removeConn(connID)
 	log.Printf("[分流] %s 直连已断开: %s", clientAddr, target)
 	return nil

@@ -49,6 +49,7 @@ export default {
 async function handleSession(webSocket) {
   let remoteSocket, remoteWriter, remoteReader;
   let isClosed = false;
+  let lastActivity = Date.now();
 
   const cleanup = () => {
     if (isClosed) return;
@@ -62,6 +63,8 @@ async function handleSession(webSocket) {
     safeCloseWebSocket(webSocket);
   };
 
+  const markActivity = () => { lastActivity = Date.now(); };
+
   const pumpRemoteToWebSocket = async () => {
     try {
       while (!isClosed && remoteReader) {
@@ -69,7 +72,10 @@ async function handleSession(webSocket) {
         
         if (done) break;
         if (webSocket.readyState !== WS_READY_STATE_OPEN) break;
-        if (value?.byteLength > 0) webSocket.send(value);
+        if (value?.byteLength > 0) {
+          markActivity();
+          webSocket.send(value);
+        }
       }
     } catch {}
     
@@ -122,6 +128,7 @@ async function handleSession(webSocket) {
           await remoteWriter.write(encoder.encode(firstFrameData));
         }
 
+        markActivity();
         webSocket.send('CONNECTED');
         pumpRemoteToWebSocket();
         return;
@@ -145,6 +152,7 @@ async function handleSession(webSocket) {
     if (isClosed) return;
 
     try {
+      markActivity();
       const data = event.data;
 
       if (typeof data === 'string') {
