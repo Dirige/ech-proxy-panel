@@ -6,7 +6,7 @@ services:
     container_name: ech-proxy
     restart: always
     ports:
-      - "9090:9090"
+      - "9091:9090"
       - "30000:30000"
     volumes:
       - /ikuai/docker/ECH/data:/data
