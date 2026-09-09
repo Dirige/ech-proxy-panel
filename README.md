@@ -31,6 +31,7 @@ docker run -d \
   --restart always \
   -p 9090:9090 \
   -p 30000:30000 \
+  -v ech-data:/data \
   ghcr.io/dirige/ech-proxy-panel:latest \
   -l 0.0.0.0:30000 \
   -f 你的服务地址:443 \
