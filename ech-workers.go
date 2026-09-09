@@ -1311,112 +1311,47 @@ func startExitInfoDetector() {
 
 func detectExitInfo() {
 	log.Printf("[检测] === 开始检测出口IP ===")
-	effectiveAddr := getEffectiveServerAddr()
-	host, port, path, err := parseServerAddr(effectiveAddr)
-	if err != nil {
-		log.Printf("[检测] 解析地址失败: %v", err)
-		return
+
+	// 通过本地 HTTP 代理检测出口 IP（避免 Worker 不支持 80 端口的问题）
+	localProxy := "http://127.0.0.1" + listenAddr[strings.Index(listenAddr, ":"):]
+	proxyURL, _ := url.Parse(localProxy)
+
+	client := &http.Client{
+		Timeout: 15 * time.Second,
+		Transport: &http.Transport{
+			Proxy: http.ProxyURL(proxyURL),
+		},
 	}
 
-	echBytes, echErr := getECHList()
-	if echErr != nil {
-		log.Printf("[检测] 获取ECH失败: %v", echErr)
-		return
-	}
-
-	tlsCfg, tlsErr := buildTLSConfigWithECH(host, echBytes)
-	if tlsErr != nil {
-		log.Printf("[检测] TLS配置失败: %v", tlsErr)
-		return
-	}
-
-	wsURL := fmt.Sprintf("wss://%s:%s%s", host, port, path)
-	dialer := websocket.Dialer{
-		TLSClientConfig: tlsCfg,
-		Subprotocols: func() []string {
-			if token == "" { return nil }
-			return []string{token}
-		}(),
-		HandshakeTimeout: 10 * time.Second,
-	}
-	if serverIP != "" {
-		dialer.NetDial = func(network, address string) (net.Conn, error) {
-			_, p, err := net.SplitHostPort(address)
-			if err != nil { return nil, err }
-			return net.DialTimeout(network, net.JoinHostPort(serverIP, p), 10*time.Second)
-		}
-	}
-
-	// 检测出口IP（通过 api.ipify.org:80）
-	wsConn, _, dialErr := dialer.Dial(wsURL, nil)
-	if dialErr != nil {
-		log.Printf("[检测] WebSocket连接失败: %v", dialErr)
-		return
-	}
-	log.Printf("[检测] WebSocket已连接，发送CONNECT...")
-
-	connectMsg := fmt.Sprintf("CONNECT:api.ipify.org:80|")
-	wsConn.WriteMessage(websocket.TextMessage, []byte(connectMsg))
-	_, msg, err := wsConn.ReadMessage()
-	if err != nil || string(msg) != "CONNECTED" {
-		log.Printf("[检测] CONNECT失败: msg=%s err=%v", string(msg), err)
-		wsConn.Close()
-		return
-	}
-	log.Printf("[检测] CONNECT成功，发送HTTP请求...")
-
-	httpReq := "GET /?format=json HTTP/1.1\r\nHost: api.ipify.org\r\nConnection: close\r\n\r\n"
-	wsConn.WriteMessage(websocket.BinaryMessage, []byte(httpReq))
-
-	var respData []byte
-	wsConn.SetReadDeadline(time.Now().Add(5 * time.Second))
-	for {
-		_, m, err := wsConn.ReadMessage()
-		if err != nil { break }
-		respData = append(respData, m...)
-	}
-	wsConn.Close()
-	log.Printf("[检测] 收到响应: %d 字节", len(respData))
-
+	// 检测出口 IP
 	exitIP := ""
-	if idx := bytes.Index(respData, []byte("{")); idx >= 0 {
-		end := bytes.Index(respData[idx:], []byte("}"))
-		if end >= 0 {
-			var ipResp struct{ IP string `json:"ip"` }
-			if json.Unmarshal(respData[idx:idx+end+1], &ipResp) == nil {
-				exitIP = ipResp.IP
-			}
+	resp, err := client.Get("https://api.ipify.org?format=json")
+	if err != nil {
+		log.Printf("[检测] 获取出口IP失败: %v", err)
+	} else {
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		var ipResp struct{ IP string `json:"ip"` }
+		if json.Unmarshal(body, &ipResp) == nil {
+			exitIP = ipResp.IP
 		}
 	}
 
-	// 检测COLO（通过 1.1.1.1:80）
-	wsConn2, _, dialErr2 := dialer.Dial(wsURL, nil)
-	var colo string
-	if dialErr2 == nil {
-		connectMsg2 := fmt.Sprintf("CONNECT:1.1.1.1:80|")
-		wsConn2.WriteMessage(websocket.TextMessage, []byte(connectMsg2))
-		_, msg2, err2 := wsConn2.ReadMessage()
-		if err2 == nil && string(msg2) == "CONNECTED" {
-			traceReq := "GET /cdn-cgi/trace HTTP/1.1\r\nHost: 1.1.1.1\r\nConnection: close\r\n\r\n"
-			wsConn2.WriteMessage(websocket.BinaryMessage, []byte(traceReq))
-			var traceData []byte
-			wsConn2.SetReadDeadline(time.Now().Add(5 * time.Second))
-			for {
-				_, m, err := wsConn2.ReadMessage()
-				if err != nil { break }
-				traceData = append(traceData, m...)
+	// 检测 COLO（通过 Cloudflare trace）
+	colo := ""
+	resp2, err := client.Get("https://1.1.1.1/cdn-cgi/trace")
+	if err == nil {
+		defer resp2.Body.Close()
+		body, _ := io.ReadAll(resp2.Body)
+		traceStr := string(body)
+		if idx := strings.Index(traceStr, "colo="); idx >= 0 {
+			start := idx + 5
+			end := start
+			for end < len(traceStr) && traceStr[end] != '\r' && traceStr[end] != '\n' {
+				end++
 			}
-			traceStr := string(traceData)
-			if idx := strings.Index(traceStr, "colo="); idx >= 0 {
-				start := idx + 5
-				end := start
-				for end < len(traceStr) && traceStr[end] != '\r' && traceStr[end] != '\n' {
-					end++
-				}
-				colo = traceStr[start:end]
-			}
+			colo = traceStr[start:end]
 		}
-		wsConn2.Close()
 	}
 
 	exitInfoMu.Lock()
@@ -1514,13 +1449,20 @@ const typeHTTPS = 65
 var dohHTTPClient = &http.Client{
 	Timeout: 10 * time.Second,
 	Transport: &http.Transport{
-		MaxIdleConns:        10,
-		IdleConnTimeout:     90 * time.Second,
+		Proxy:             http.ProxyFromEnvironment,
+		MaxIdleConns:      10,
+		IdleConnTimeout:   90 * time.Second,
 		TLSHandshakeTimeout: 10 * time.Second,
 	},
 }
 
 func prepareECH() error {
+	// 如果配置了环境代理，跳过 ECH（代理环境下 ECH 可能不兼容）
+	if hasEnvProxy() {
+		log.Printf("[ECH] 检测到环境代理，跳过 ECH 配置获取")
+		return nil
+	}
+
 	echBase64, err := queryHTTPSRecord(echDomain, dnsServer)
 	if err != nil {
 		return fmt.Errorf("DNS 查询失败: %w", err)
@@ -1852,6 +1794,16 @@ func parseServerAddr(addr string) (host, port, path string, err error) {
 	return host, port, path, nil
 }
 
+// hasEnvProxy 检测是否配置了环境代理
+func hasEnvProxy() bool {
+	for _, key := range []string{"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"} {
+		if v := os.Getenv(key); v != "" {
+			return true
+		}
+	}
+	return false
+}
+
 func dialWebSocketWithECH(maxRetries int) (*websocket.Conn, error) {
 	effectiveAddr := getEffectiveServerAddr()
 	host, port, path, err := parseServerAddr(effectiveAddr)
@@ -1860,20 +1812,34 @@ func dialWebSocketWithECH(maxRetries int) (*websocket.Conn, error) {
 	}
 
 	wsURL := fmt.Sprintf("wss://%s:%s%s", host, port, path)
+	useProxy := hasEnvProxy()
 
 	for attempt := 1; attempt <= maxRetries; attempt++ {
-		echBytes, echErr := getECHList()
-		if echErr != nil {
-			if attempt < maxRetries {
-				refreshECH()
-				continue
-			}
-			return nil, echErr
-		}
+		var tlsCfg *tls.Config
 
-		tlsCfg, tlsErr := buildTLSConfigWithECH(host, echBytes)
-		if tlsErr != nil {
-			return nil, tlsErr
+		if useProxy {
+			// 通过环境代理连接时跳过 ECH（ECH 在代理隧道中可能不兼容）
+			tlsCfg = &tls.Config{
+				ServerName: host,
+				MinVersion: tls.VersionTLS13,
+			}
+			if attempt == 1 {
+				log.Printf("[代理] 检测到环境代理，跳过 ECH 直接连接")
+			}
+		} else {
+			echBytes, echErr := getECHList()
+			if echErr != nil {
+				if attempt < maxRetries {
+					refreshECH()
+					continue
+				}
+				return nil, echErr
+			}
+
+			tlsCfg, err = buildTLSConfigWithECH(host, echBytes)
+			if err != nil {
+				return nil, err
+			}
 		}
 
 		dialer := websocket.Dialer{
@@ -1885,9 +1851,11 @@ func dialWebSocketWithECH(maxRetries int) (*websocket.Conn, error) {
 				return []string{token}
 			}(),
 			HandshakeTimeout: 10 * time.Second,
+			Proxy:            http.ProxyFromEnvironment,
 		}
 
-		if serverIP != "" {
+		// 只有在没有配置环境代理时才使用自定义拨号连接固定 IP
+		if serverIP != "" && !useProxy {
 			dialer.NetDial = func(network, address string) (net.Conn, error) {
 				_, port, err := net.SplitHostPort(address)
 				if err != nil {
@@ -1899,7 +1867,7 @@ func dialWebSocketWithECH(maxRetries int) (*websocket.Conn, error) {
 
 		wsConn, _, dialErr := dialer.Dial(wsURL, nil)
 		if dialErr != nil {
-			if strings.Contains(dialErr.Error(), "ECH") && attempt < maxRetries {
+			if !useProxy && strings.Contains(dialErr.Error(), "ECH") && attempt < maxRetries {
 				log.Printf("[ECH] 连接失败，尝试刷新配置 (%d/%d)", attempt, maxRetries)
 				refreshECH()
 				time.Sleep(time.Second)
