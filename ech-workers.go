@@ -755,8 +755,23 @@ func shouldBypassProxyCustom(targetHost string) bool {
 	for _, rule := range customRules {
 		switch rule.Type {
 		case "domain":
-			if !isIP && strings.Contains(host, rule.Value) {
-				return rule.Action == "direct"
+			if !isIP {
+				matched := false
+				// 支持通配符 *.domain
+				if strings.HasPrefix(rule.Value, "*.") {
+					suffix := strings.TrimPrefix(rule.Value, "*.")
+					if host == suffix || strings.HasSuffix(host, "."+suffix) {
+						matched = true
+					}
+				} else {
+					// 精确匹配或子域名匹配
+					if host == rule.Value || strings.HasSuffix(host, "."+rule.Value) {
+						matched = true
+					}
+				}
+				if matched {
+					return rule.Action == "direct"
+				}
 			}
 		case "ipcidr":
 			if isIP {
