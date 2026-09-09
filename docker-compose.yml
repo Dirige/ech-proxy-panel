@@ -1,16 +1,18 @@
-version: '3'
+version: '3.8'
+
 services:
-  ech-workers:
-    build: .
-    image: cirnosalt/ech-workers-docker:latest
-    container_name: ech-workers
-    restart: unless-stopped
-    network_mode: host
+  ech-proxy:
+    image: ghcr.io/dirige/ech-proxy-panel:latest
+    container_name: ech-proxy
+    restart: always
+    ports:
+      - "9090:9090"
+      - "30000:30000"
     volumes:
-      - ./config:/etc/ech-workers
+      - /ikuai/docker/ECH/data:/data
     command: >
-      -l 127.0.0.1:30000
-      -f YOUR_WORKER.workers.dev:443
-      -token YOUR_TOKEN
-      -routing global
+      -l 0.0.0.0:30000
+      -f 你的服务地址:443
+      -token 你的令牌
       -web :9090
+      -routing global
