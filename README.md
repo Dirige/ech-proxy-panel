@@ -40,6 +40,12 @@ docker run -d \
   -routing global
 ```
 
+首次运行后，配置会自动保存到 `/data/config.json`。之后重启容器无需再传参数：
+
+```bash
+docker restart ech-proxy
+```
+
 ### 参数说明
 
 | 参数 | 必填 | 说明 | 示例 |
