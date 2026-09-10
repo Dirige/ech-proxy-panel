@@ -1099,13 +1099,25 @@ func handleConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// POST: 更新配置 (部分字段)
+	// POST: 更新配置
 	var update map[string]string
 	if err := json.NewDecoder(r.Body).Decode(&update); err != nil {
 		http.Error(w, `{"error":"invalid json"}`, 400)
 		return
 	}
 
+	if v, ok := update["listen_addr"]; ok && v != "" {
+		listenAddr = v
+	}
+	if v, ok := update["server_addr"]; ok && v != "" {
+		serverAddr = v
+	}
+	if v, ok := update["server_ip"]; ok {
+		serverIP = v
+	}
+	if v, ok := update["token"]; ok && v != "" {
+		token = v
+	}
 	if v, ok := update["dns_server"]; ok {
 		dnsServer = v
 	}
@@ -1122,6 +1134,9 @@ func handleConfig(w http.ResponseWriter, r *http.Request) {
 			routingMode = v
 			log.Printf("[配置] 分流模式已更新: %s", routingMode)
 		}
+	}
+	if v, ok := update["web_addr"]; ok && v != "" {
+		webAddr = v
 	}
 
 	// 刷新 ECH
