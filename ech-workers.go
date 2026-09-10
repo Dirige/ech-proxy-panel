@@ -428,20 +428,7 @@ func isChinaIP(ipStr string) bool {
 		chinaIPRangesMu.RLock()
 		defer chinaIPRangesMu.RUnlock()
 
-		// 二分查找
-		left, right := 0, len(chinaIPRanges)
-		for left < right {
-			mid := (left + right) / 2
-			r := chinaIPRanges[mid]
-			if ipUint32 < r.start {
-				right = mid
-			} else if ipUint32 > r.end {
-				left = mid + 1
-			} else {
-				return true
-			}
-		}
-		return false
+		return findIPv4Range(chinaIPRanges, ipUint32)
 	}
 
 	// 检查IPv6
@@ -568,6 +555,7 @@ func loadChinaIPList() error {
 
 	var ranges []ipRange
 	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" || strings.HasPrefix(line, "#") {
@@ -575,6 +563,25 @@ func loadChinaIPList() error {
 		}
 
 		parts := strings.Fields(line)
+		if len(parts) == 0 {
+			continue
+		}
+
+		// 支持 CIDR 格式: 1.0.1.0/24
+		if len(parts) == 1 && strings.Contains(parts[0], "/") {
+			_, cidr, err := net.ParseCIDR(parts[0])
+			if err != nil {
+				continue
+			}
+			start := ipToUint32(cidr.IP)
+			end := ipToUint32(lastIP(cidr))
+			if start > 0 && end > 0 && start <= end {
+				ranges = append(ranges, ipRange{start: start, end: end})
+			}
+			continue
+		}
+
+		// 支持 "startIP endIP" 格式
 		if len(parts) < 2 {
 			continue
 		}
@@ -605,11 +612,79 @@ func loadChinaIPList() error {
 		return ranges[i].start < ranges[j].start
 	})
 
+	// 合并重叠/相邻区间，保证二分查找正确
+	ranges = mergeIPv4Ranges(ranges)
+
+	// 安全检查：确保已知国外IP不会被误判为中国IP
+	foreignSamples := []string{"8.8.8.8", "1.1.1.1", "91.108.56.130", "172.67.74.152", "104.16.0.1"}
+	bad := 0
+	for _, s := range foreignSamples {
+		if findIPv4Range(ranges, ipToUint32(net.ParseIP(s))) {
+			bad++
+		}
+	}
+	if bad > 0 {
+		os.Remove(ipListFile) // 删除损坏的列表，下次启动重新下载
+		return fmt.Errorf("IP列表校验失败: 已知国外IP被误判为中国IP (%d/%d)，已丢弃该列表并回退为全局代理", bad, len(foreignSamples))
+	}
+
 	chinaIPRangesMu.Lock()
 	chinaIPRanges = ranges
 	chinaIPRangesMu.Unlock()
 
 	return nil
+}
+
+// lastIP 返回 CIDR 网络的最后一个 IP
+func lastIP(n *net.IPNet) net.IP {
+	ip := n.IP.To4()
+	if ip == nil {
+		return n.IP
+	}
+	last := make(net.IP, 4)
+	for i := 0; i < 4; i++ {
+		last[i] = ip[i] | ^n.Mask[i]
+	}
+	return last
+}
+
+// mergeIPv4Ranges 合并重叠或相邻的区间（输入需已按 start 升序排序）
+func mergeIPv4Ranges(ranges []ipRange) []ipRange {
+	if len(ranges) == 0 {
+		return ranges
+	}
+	merged := make([]ipRange, 0, len(ranges))
+	cur := ranges[0]
+	for i := 1; i < len(ranges); i++ {
+		r := ranges[i]
+		if r.start <= cur.end || (cur.end < ^uint32(0) && r.start == cur.end+1) {
+			if r.end > cur.end {
+				cur.end = r.end
+			}
+		} else {
+			merged = append(merged, cur)
+			cur = r
+		}
+	}
+	merged = append(merged, cur)
+	return merged
+}
+
+// findIPv4Range 在已排序且不重叠的区间中二分查找
+func findIPv4Range(ranges []ipRange, ip uint32) bool {
+	left, right := 0, len(ranges)
+	for left < right {
+		mid := (left + right) / 2
+		r := ranges[mid]
+		if ip < r.start {
+			right = mid
+		} else if ip > r.end {
+			left = mid + 1
+		} else {
+			return true
+		}
+	}
+	return false
 }
 
 // loadChinaIPV6List 从程序目录加载中国IPv6 IP列表
@@ -744,21 +819,24 @@ func lookupIPWithCache(host string) ([]net.IP, error) {
 
 // shouldBypassProxy 根据分流模式判断是否应该绕过代理（直连）
 func shouldBypassProxy(targetHost string) bool {
-	if routingMode == "none" {
+	// 1. 自定义规则优先级最高（任何分流模式下都生效）
+	if matched, bypass := matchCustomRule(targetHost); matched {
+		return bypass
+	}
+
+	// 2. 按分流模式决定
+	switch routingMode {
+	case "none":
 		// "不改变代理"模式：所有流量都直连
 		return true
-	}
-	if routingMode == "global" {
+	case "global":
 		// "全局代理"模式：所有流量都走代理
 		return false
-	}
-	if routingMode == "custom" {
-		// 自定义规则模式
-		return shouldBypassProxyCustom(targetHost)
-	}
-	if routingMode == "bypass_cn" {
+	case "custom":
+		// 自定义规则模式：无匹配规则时默认走代理
+		return false
+	case "bypass_cn":
 		// "跳过中国大陆"模式：检查是否是中国IP
-		// 先尝试解析为IP
 		if ip := net.ParseIP(targetHost); ip != nil {
 			return isChinaIP(targetHost)
 		}
@@ -781,15 +859,20 @@ func shouldBypassProxy(targetHost string) bool {
 	return false
 }
 
-// shouldBypassProxyCustom 自定义规则分流
-func shouldBypassProxyCustom(targetHost string) bool {
+// matchCustomRule 匹配自定义规则，返回 (是否命中, 是否直连)
+func matchCustomRule(targetHost string) (bool, bool) {
 	customRulesMu.RLock()
 	defer customRulesMu.RUnlock()
+
+	if len(customRules) == 0 {
+		return false, false
+	}
 
 	host, _, err := net.SplitHostPort(targetHost)
 	if err != nil {
 		host = targetHost
 	}
+	host = strings.ToLower(strings.TrimSuffix(host, "."))
 
 	// 检查是否是IP地址
 	isIP := net.ParseIP(host) != nil
@@ -798,21 +881,22 @@ func shouldBypassProxyCustom(targetHost string) bool {
 		switch rule.Type {
 		case "domain":
 			if !isIP {
+				value := strings.ToLower(strings.TrimSpace(rule.Value))
 				matched := false
 				// 支持通配符 *.domain
-				if strings.HasPrefix(rule.Value, "*.") {
-					suffix := strings.TrimPrefix(rule.Value, "*.")
+				if strings.HasPrefix(value, "*.") {
+					suffix := strings.TrimPrefix(value, "*.")
 					if host == suffix || strings.HasSuffix(host, "."+suffix) {
 						matched = true
 					}
 				} else {
 					// 精确匹配或子域名匹配
-					if host == rule.Value || strings.HasSuffix(host, "."+rule.Value) {
+					if host == value || strings.HasSuffix(host, "."+value) {
 						matched = true
 					}
 				}
 				if matched {
-					return rule.Action == "direct"
+					return true, rule.Action == "direct"
 				}
 			}
 		case "ipcidr":
@@ -821,18 +905,18 @@ func shouldBypassProxyCustom(targetHost string) bool {
 				if ip != nil {
 					_, cidr, err := net.ParseCIDR(rule.Value)
 					if err == nil && cidr.Contains(ip) {
-						return rule.Action == "direct"
+						return true, rule.Action == "direct"
 					}
 				}
 			}
 		case "keyword":
-			if strings.Contains(host, rule.Value) {
-				return rule.Action == "direct"
+			if rule.Value != "" && strings.Contains(host, strings.ToLower(rule.Value)) {
+				return true, rule.Action == "direct"
 			}
 		}
 	}
-	// 没有匹配规则，默认走代理
-	return false
+	// 没有匹配规则
+	return false, false
 }
 
 func isNormalCloseError(err error) bool {
@@ -2378,7 +2462,7 @@ func handleTunnel(conn net.Conn, target, clientAddr string, mode int, firstFrame
 	rule := "proxy"
 	if shouldBypassProxy(targetHost) {
 		rule = "direct"
-		log.Printf("[分流] %s -> %s (直连，绕过代理)", clientAddr, target)
+		log.Printf("[分流] %s -> %s (直连, 模式=%s)", clientAddr, target, routingMode)
 		return handleDirectConnection(conn, target, clientAddr, mode, firstFrame)
 	}
 
@@ -2393,7 +2477,7 @@ func handleTunnel(conn net.Conn, target, clientAddr string, mode int, firstFrame
 	connInfoObj, _ := activeConns.Load(connID)
 	connInfoPtr := connInfoObj.(*connInfo)
 
-	log.Printf("[分流] %s -> %s (通过代理)", clientAddr, target)
+	log.Printf("[分流] %s -> %s (通过代理, 模式=%s)", clientAddr, target, routingMode)
 	wsConn, err := dialWebSocketWithECH(2)
 	if err != nil {
 		removeConn(connID)
