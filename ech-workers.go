@@ -2413,24 +2413,25 @@ func handleTunnel(conn net.Conn, target, clientAddr string, mode int, firstFrame
 	}
 	defer cleanup()
 
-	// 保活 + WebSocket 读取超时管理
-	// 设置读取超时为 60s，每次收到数据或 pong 时重置
-	wsConn.SetReadDeadline(time.Now().Add(60 * time.Second))
+	// 保活 + WebSocket 读取/写入超时管理
+	wsConn.SetReadDeadline(time.Now().Add(120 * time.Second))
 	wsConn.SetPongHandler(func(string) error {
-		wsConn.SetReadDeadline(time.Now().Add(60 * time.Second))
+		wsConn.SetReadDeadline(time.Now().Add(120 * time.Second))
 		return nil
 	})
 
 	stopPing := make(chan struct{})
 	go func() {
-		ticker := time.NewTicker(15 * time.Second)
+		ticker := time.NewTicker(20 * time.Second)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-ticker.C:
 				mu.Lock()
 				if !closed.Load() {
+					wsConn.SetWriteDeadline(time.Now().Add(15 * time.Second))
 					wsConn.WriteMessage(websocket.PingMessage, nil)
+					wsConn.SetWriteDeadline(time.Time{})
 				}
 				mu.Unlock()
 			case <-stopPing:
@@ -2493,10 +2494,11 @@ func handleTunnel(conn net.Conn, target, clientAddr string, mode int, firstFrame
 	log.Printf("[代理] %s 已连接: %s", clientAddr, target)
 
 	// 双向转发
-	done := make(chan struct{}, 2)
+	done := make(chan struct{})
 
 	// Client -> Server
 	go func() {
+		defer func() { select { case done <- struct{}{}: default: } }()
 		buf := make([]byte, 65536)
 		for {
 			n, err := conn.Read(buf)
@@ -2506,20 +2508,22 @@ func handleTunnel(conn net.Conn, target, clientAddr string, mode int, firstFrame
 				}
 				mu.Lock()
 				if !closed.Load() {
+					wsConn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 					wsConn.WriteMessage(websocket.TextMessage, []byte("CLOSE"))
+					wsConn.SetWriteDeadline(time.Time{})
 				}
 				mu.Unlock()
-				done <- struct{}{}
 				return
 			}
 
 			connInfoPtr.upload.Add(int64(n))
 
 			mu.Lock()
+			wsConn.SetWriteDeadline(time.Now().Add(30 * time.Second))
 			err = wsConn.WriteMessage(websocket.BinaryMessage, buf[:n])
+			wsConn.SetWriteDeadline(time.Time{})
 			mu.Unlock()
 			if err != nil {
-				done <- struct{}{}
 				return
 			}
 		}
@@ -2527,34 +2531,30 @@ func handleTunnel(conn net.Conn, target, clientAddr string, mode int, firstFrame
 
 	// Server -> Client
 	go func() {
+		defer func() { select { case done <- struct{}{}: default: } }()
 		for {
 			mt, msg, err := wsConn.ReadMessage()
 			if err != nil {
 				if !isNormalCloseError(err) {
 					log.Printf("[代理] %s WebSocket 读取错误: %v", clientAddr, err)
 				}
-				done <- struct{}{}
 				return
 			}
 
-			// 收到数据，重置读取超时
-			wsConn.SetReadDeadline(time.Now().Add(60 * time.Second))
+			wsConn.SetReadDeadline(time.Now().Add(120 * time.Second))
 
 			if mt == websocket.TextMessage {
 				if string(msg) == "CLOSE" {
-					done <- struct{}{}
 					return
 				}
 			}
 
 			connInfoPtr.download.Add(int64(len(msg)))
 
-			// 使用 io.WriteString 风格的完整写入，避免部分写入
 			written := 0
 			for written < len(msg) {
 				n, err := conn.Write(msg[written:])
 				if err != nil {
-					done <- struct{}{}
 					return
 				}
 				written += n
@@ -2563,7 +2563,6 @@ func handleTunnel(conn net.Conn, target, clientAddr string, mode int, firstFrame
 	}()
 
 	<-done
-	// 一方结束，主动关闭连接释放另一方的阻塞
 	cleanup()
 	removeConn(connID)
 	log.Printf("[代理] %s 已断开: %s", clientAddr, target)
@@ -2644,15 +2643,15 @@ func handleDirectConnection(conn net.Conn, target, clientAddr string, mode int, 
 	}
 
 	// 双向转发
-	done := make(chan struct{}, 2)
+	done := make(chan struct{})
 
 	// Client -> Target
 	go func() {
+		defer func() { select { case done <- struct{}{}: default: } }()
 		buf := make([]byte, 65536)
 		for {
 			n, err := conn.Read(buf)
 			if err != nil {
-				done <- struct{}{}
 				return
 			}
 			connInfoPtr.upload.Add(int64(n))
@@ -2660,7 +2659,6 @@ func handleDirectConnection(conn net.Conn, target, clientAddr string, mode int, 
 			for written < n {
 				m, err := targetConn.Write(buf[written:n])
 				if err != nil {
-					done <- struct{}{}
 					return
 				}
 				written += m
@@ -2670,11 +2668,11 @@ func handleDirectConnection(conn net.Conn, target, clientAddr string, mode int, 
 
 	// Target -> Client
 	go func() {
+		defer func() { select { case done <- struct{}{}: default: } }()
 		buf := make([]byte, 65536)
 		for {
 			n, err := targetConn.Read(buf)
 			if err != nil {
-				done <- struct{}{}
 				return
 			}
 			connInfoPtr.download.Add(int64(n))
@@ -2682,7 +2680,6 @@ func handleDirectConnection(conn net.Conn, target, clientAddr string, mode int, 
 			for written < n {
 				m, err := conn.Write(buf[written:n])
 				if err != nil {
-					done <- struct{}{}
 					return
 				}
 				written += m
@@ -2691,7 +2688,6 @@ func handleDirectConnection(conn net.Conn, target, clientAddr string, mode int, 
 	}()
 
 	<-done
-	// 一方结束，关闭双方连接释放另一方阻塞
 	cleanup()
 	removeConn(connID)
 	log.Printf("[分流] %s 直连已断开: %s", clientAddr, target)
