@@ -7,7 +7,7 @@
 ## 新增功能
 
 - Web 管理面板（暗色主题）
-- 实时上传/下载速度 + 总流量统计
+- 实时上传/下载速度 + 总流量统计（代理 + 直连流量合计）
 - 活跃连接列表
 - 简化的分流规则（直连域名 / 代理域名）
 - 出口 IP 和 CF 落地节点（COLO）自动检测
@@ -85,7 +85,7 @@ docker pull ghcr.io/dirige/ech-proxy-panel:latest
 docker run -d \
   --name ech-proxy \
   --restart always \
-  -p 9090:9090 \
+  -p 9091:9090 \
   -p 30000:30000 \
   -v ech-data:/data \
   ghcr.io/dirige/ech-proxy-panel:latest \
@@ -95,6 +95,8 @@ docker run -d \
   -web :9090 \
   -routing global
 ```
+
+> 面板端口映射为 `9091`（爱快上 9090 常被占用），访问地址为 `http://爱快IP:9091`。
 
 ### 步骤 3：后续重启
 
@@ -108,7 +110,7 @@ docker restart ech-proxy
 
 **方式一：Web 面板**
 
-浏览器打开 `http://爱快IP:9090`，在「配置」页面修改，点保存。
+浏览器打开 `http://爱快IP:9091`，在「配置」页面修改，点保存。
 
 **方式二：手动编辑配置文件**
 
@@ -119,7 +121,7 @@ docker restart ech-proxy
 
 ### 配置文件模板
 
-`/data/config.json`：
+`/data/config.json`（仓库中的 `config.example.json` 即模板，复制后填入真实值）：
 
 ```json
 {
@@ -165,7 +167,9 @@ domain,github.com,proxy
 
 格式：`domain,域名,动作`（动作：`direct` 直连 / `proxy` 代理）
 
-> domain 规则是包含匹配：添加 `255432.xyz` 会匹配 `emos.255432.xyz` 等所有子域名。
+> domain 规则匹配逻辑：
+> - `255432.xyz`：精确匹配本身 + 所有子域名（如 `emos.255432.xyz`）
+> - `*.255432.xyz`：通配符写法，同样匹配本身 + 所有子域名
 
 挂载到容器：
 

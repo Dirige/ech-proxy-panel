@@ -518,19 +518,7 @@ function fmtSpeed(bps){if(bps===0)return '0 B/s';const k=1024;const u=['B/s','KB
 async function api(path,opts){const r=await fetch(path,opts);return r.json()}
 function escHtml(s){const d=document.createElement('div');d.textContent=s;return d.innerHTML}
 
-let prevTotalUp=0,prevTotalDn=0,prevTime=0,firstUpdate=true;
-function calcSpeed(totalUp,totalDn){
-  const now=Date.now();
-  if(firstUpdate){prevTotalUp=totalUp;prevTotalDn=totalDn;prevTime=now;firstUpdate=false;return}
-  const dt=(now-prevTime)/1000;
-  if(dt>0.5){
-    const upSpeed=Math.max(0,(totalUp-prevTotalUp)/dt);
-    const dnSpeed=Math.max(0,(totalDn-prevTotalDn)/dt);
-    document.getElementById('ov-speed-up').textContent=fmtSpeed(upSpeed);
-    document.getElementById('ov-speed-down').textContent=fmtSpeed(dnSpeed);
-    prevTotalUp=totalUp;prevTotalDn=totalDn;prevTime=now;
-  }
-}
+// 实时速度由后端通过 WebSocket 推送（rt_upload/rt_download，单位 B/s），前端直接显示
 
 async function detectIP(){try{const r=await fetch('https://api.ipify.org?format=json');const d=await r.json();document.getElementById('ov-ip').textContent=d.ip}catch(e){document.getElementById('ov-ip').textContent='检测失败'}}
 async function detectExitInfo(){try{const r=await fetch('/api/exit-info');const d=await r.json();if(d.error){document.getElementById('ov-exit-ip').textContent='检测失败';document.getElementById('ov-colo').textContent='检测失败';return}document.getElementById('ov-exit-ip').textContent=d.exit_ip||'未知';document.getElementById('ov-colo').textContent=d.colo||'未知'}catch(e){document.getElementById('ov-exit-ip').textContent='检测失败';document.getElementById('ov-colo').textContent='检测失败'}}
@@ -551,7 +539,6 @@ async function loadOverview(){
   document.getElementById('ov-total-up').textContent=fmtBytes(status.total_upload);
   document.getElementById('ov-total-down').textContent=fmtBytes(status.total_download);
   document.getElementById('ov-mem').textContent=status.memory_mb.toFixed(1)+' MB';
-  calcSpeed(status.total_upload,status.total_download);
   const logEl=document.getElementById('ov-logs');
   if(!logs||logs.length===0){logEl.innerHTML='<div class="empty">暂无日志</div>';return}
   logEl.innerHTML=logs.map(l=>{const cls=l.level==='error'?'level-error':l.level==='warn'?'level-warn':'level-info';return`<div class="log-line"><span class="time">${l.time}</span> <span class="${cls}">[${l.level}]</span> ${escHtml(l.msg)}</div>`}).join('');
@@ -585,7 +572,7 @@ async function saveConfig(){await api('/api/config',{method:'POST',headers:{'Con
 async function refreshECH(){const r=await api('/api/service/refresh-ech',{method:'POST'});toast(r.message||r.error);loadOverview()}
 
 let ws;
-function connectWS(){const proto=location.protocol==='https:'?'wss:':'ws:';ws=new WebSocket(`${proto}//${location.host}/ws`);ws.onmessage=(e)=>{try{const d=JSON.parse(e.data);document.getElementById('ov-active').textContent=d.active_conns;document.getElementById('ov-total-up').textContent=fmtBytes(d.total_upload);document.getElementById('ov-total-down').textContent=fmtBytes(d.total_download);document.getElementById('ov-mem').textContent=d.memory_mb.toFixed(1)+' MB';calcSpeed(d.total_upload,d.total_download)}catch(ex){}};ws.onclose=()=>setTimeout(connectWS,3000)}
+function connectWS(){const proto=location.protocol==='https:'?'wss:':'ws:';ws=new WebSocket(`${proto}//${location.host}/ws`);ws.onmessage=(e)=>{try{const d=JSON.parse(e.data);document.getElementById('ov-active').textContent=d.active_conns;document.getElementById('ov-total-up').textContent=fmtBytes(d.total_upload);document.getElementById('ov-total-down').textContent=fmtBytes(d.total_download);document.getElementById('ov-mem').textContent=d.memory_mb.toFixed(1)+' MB';document.getElementById('ov-speed-up').textContent=fmtSpeed(d.rt_upload||0);document.getElementById('ov-speed-down').textContent=fmtSpeed(d.rt_download||0)}catch(ex){}};ws.onclose=()=>setTimeout(connectWS,3000)}
 connectWS();
 </script>
 </body>

@@ -1,11 +1,11 @@
 {
   "listen_addr": "0.0.0.0:30000",
-  "server_addr": "hhech.nb1tap.kdns.fr:443",
+  "server_addr": "你的服务地址:443",
   "server_ip": "",
-  "token": "honghongfree",
+  "token": "你的令牌",
   "dns_server": "dns.alidns.com/dns-query",
   "ech_domain": "cloudflare-ech.com",
   "routing_mode": "global",
-  "web_addr": ":9095",
+  "web_addr": ":9090",
   "proxy_ip": ""
 }

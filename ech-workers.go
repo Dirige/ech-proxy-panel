@@ -1059,6 +1059,9 @@ func handleStatus(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)
+	customRulesMu.RLock()
+	customRulesCount := len(customRules)
+	customRulesMu.RUnlock()
 	json.NewEncoder(w).Encode(statusResponse{
 		Uptime:        time.Since(startTime).Truncate(time.Second).String(),
 		TotalConns:    totalConns.Load(),
@@ -1070,7 +1073,7 @@ func handleStatus(w http.ResponseWriter, r *http.Request) {
 		ServerAddr:    serverAddr,
 		ECHDomain:     echDomain,
 		WebAddr:       webAddr,
-		CustomRules:   len(customRules),
+		CustomRules:   customRulesCount,
 		MemoryMB:      float64(m.Alloc) / 1024 / 1024,
 	})
 }
@@ -1386,8 +1389,9 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 
-	// 用于计算实时速度
+	// 用于计算实时速度（单位 B/s）
 	var prevUp, prevDn int64
+	var prevTime time.Time
 	firstTick := true
 
 	for {
@@ -1402,24 +1406,29 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 				return true
 			})
 
-			// 计算增量速度（总上传/下载 - 上次值）
+			// 计算增量速度（总上传/下载 - 上次值）/ 实际间隔秒数
 			curUp := totalUpload.Load() + rtUp
 			curDn := totalDownload.Load() + rtDn
+			now := time.Now()
 			speedUp := int64(0)
 			speedDn := int64(0)
 			if !firstTick {
-				speedUp = curUp - prevUp
-				speedDn = curDn - prevDn
-				if speedUp < 0 {
-					speedUp = 0
-				}
-				if speedDn < 0 {
-					speedDn = 0
+				dt := now.Sub(prevTime).Seconds()
+				if dt > 0 {
+					speedUp = int64(float64(curUp-prevUp) / dt)
+					speedDn = int64(float64(curDn-prevDn) / dt)
+					if speedUp < 0 {
+						speedUp = 0
+					}
+					if speedDn < 0 {
+						speedDn = 0
+					}
 				}
 			}
 			firstTick = false
 			prevUp = curUp
 			prevDn = curDn
+			prevTime = now
 
 			var m runtime.MemStats
 			runtime.ReadMemStats(&m)
@@ -2378,11 +2387,11 @@ func handleTunnel(conn net.Conn, target, clientAddr string, mode int, firstFrame
 	}
 
 	var mu sync.Mutex
-	closed := false
+	var closed atomic.Bool
 	closeOnce := sync.Once{}
 	cleanup := func() {
 		closeOnce.Do(func() {
-			closed = true
+			closed.Store(true)
 			wsConn.Close()
 			conn.Close()
 		})
@@ -2405,7 +2414,7 @@ func handleTunnel(conn net.Conn, target, clientAddr string, mode int, firstFrame
 			select {
 			case <-ticker.C:
 				mu.Lock()
-				if !closed {
+				if !closed.Load() {
 					wsConn.WriteMessage(websocket.PingMessage, nil)
 				}
 				mu.Unlock()
@@ -2481,7 +2490,7 @@ func handleTunnel(conn net.Conn, target, clientAddr string, mode int, firstFrame
 					log.Printf("[代理] %s 客户端读取错误: %v", clientAddr, err)
 				}
 				mu.Lock()
-				if !closed {
+				if !closed.Load() {
 					wsConn.WriteMessage(websocket.TextMessage, []byte("CLOSE"))
 				}
 				mu.Unlock()

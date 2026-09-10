@@ -5,6 +5,7 @@
 ech-workers
 go.mod
 go.sum
+config.json
 dist/
 __pycache__/
 *.pyc
