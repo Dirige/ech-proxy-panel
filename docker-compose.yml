@@ -1,12 +1,10 @@
-version: '3.8'
-
 services:
   ech-proxy:
     image: ghcr.io/dirige/ech-proxy-panel:latest
     container_name: ech
     restart: always
     ports:
-      - "30001:9090"
+      - "9091:9090"
       - "30000:30000"
     volumes:
       - ./data:/data

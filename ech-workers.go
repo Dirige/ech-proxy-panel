@@ -4,11 +4,13 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
 	"embed"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -406,6 +408,7 @@ func main() {
 
 	// 初始化 web 会话管理
 	webSessions = make(map[string]time.Time)
+	go startSessionGC()
 
 	// 启动 Web 管理面板
 	if webAddr != "" {
@@ -1258,24 +1261,87 @@ func startWebServer(addr string) {
 	}
 }
 
+// isWebAuthenticated 检查当前请求是否已登录
+func isWebAuthenticated(r *http.Request) bool {
+	if webPassword == "" {
+		return true
+	}
+	cookie, err := r.Cookie("ech_session")
+	if err != nil || cookie.Value == "" {
+		return false
+	}
+	webSessionsMu.Lock()
+	defer webSessionsMu.Unlock()
+	exp, ok := webSessions[cookie.Value]
+	if !ok {
+		return false
+	}
+	if time.Now().After(exp) {
+		delete(webSessions, cookie.Value)
+		return false
+	}
+	return true
+}
+
+// newSessionID 生成不可预测的 session ID
+func newSessionID() string {
+	var b [32]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		// 极小概率降级：纳秒 + pid，但仍尽量不可预测
+		return fmt.Sprintf("%d-%d", time.Now().UnixNano(), os.Getpid())
+	}
+	return hex.EncodeToString(b[:])
+}
+
+// clearExpiredSessions 定期清理过期 session，避免内存泄漏
+func startSessionGC() {
+	ticker := time.NewTicker(1 * time.Hour)
+	defer ticker.Stop()
+	for range ticker.C {
+		now := time.Now()
+		webSessionsMu.Lock()
+		for k, exp := range webSessions {
+			if now.After(exp) {
+				delete(webSessions, k)
+			}
+		}
+		webSessionsMu.Unlock()
+	}
+}
+
 // authMiddleware 鉴权中间件（webPassword 为空时跳过鉴权）
+// API/WS 未登录返回 401 JSON（避免前端 fetch 拿到 302 HTML 解析失败），页面才 302 跳登录页
 func authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if webPassword == "" {
+		if isWebAuthenticated(r) {
 			next.ServeHTTP(w, r)
 			return
 		}
 
-		// 检查 cookie 中的 session
-		if cookie, err := r.Cookie("ech_session"); err == nil {
-			webSessionsMu.Lock()
-			if exp, ok := webSessions[cookie.Value]; ok && time.Now().Before(exp) {
-				webSessionsMu.Unlock()
-				next.ServeHTTP(w, r)
-				return
-			}
-			delete(webSessions, cookie.Value)
-			webSessionsMu.Unlock()
+		// 清掉失效 cookie，避免浏览器一直带无效 session
+		if _, err := r.Cookie("ech_session"); err == nil {
+			http.SetCookie(w, &http.Cookie{
+				Name:     "ech_session",
+				Value:    "",
+				Path:     "/",
+				HttpOnly: true,
+				SameSite: http.SameSiteLaxMode,
+				MaxAge:   -1,
+			})
+		}
+
+		if strings.HasPrefix(r.URL.Path, "/api/") {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			json.NewEncoder(w).Encode(map[string]string{"error": "未登录"})
+			return
+		}
+		if r.URL.Path == "/ws" {
+			// WebSocket 握手不能 302，直接 401 让前端跳登录
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			json.NewEncoder(w).Encode(map[string]string{"error": "未登录"})
+			return
 		}
 
 		// 未登录，重定向到登录页
@@ -1293,42 +1359,84 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(loginHTML))
 }
 
-// loginHTML 登录页面
+// loginHTML 登录页面（与 index.html 同一套主题变量）
 var loginHTML = `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>ECH Proxy - 登录</title>
+<title>ECH Proxy Control - 登录</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@600;700;800&family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
+:root{
+  --bg-0:#070b14;
+  --bg-1:#0c1220;
+  --bg-2:#111a2e;
+  --glass:rgba(18,27,48,0.6);
+  --glass-strong:rgba(22,33,58,0.85);
+  --border:rgba(120,180,255,0.12);
+  --border-hover:rgba(120,180,255,0.28);
+  --text:#e8eefc;
+  --text-sec:#8b99b8;
+  --text-dim:#4a5678;
+  --cyan:#22d3ee;
+  --cyan-glow:rgba(34,211,238,0.4);
+  --green:#34d399;
+  --red:#fb7185;
+  --radius:14px;
+  --radius-sm:10px;
+}
 *{margin:0;padding:0;box-sizing:border-box}
-body{background:#0f1117;color:#e1e4e8;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh}
-.login-box{background:#161b22;border:1px solid #30363d;border-radius:12px;padding:32px;width:360px;box-shadow:0 8px 24px rgba(0,0,0,.4)}
-.login-box h2{text-align:center;margin-bottom:24px;color:#58a6ff;font-size:1.3em}
-.login-box input{width:100%;padding:10px 14px;background:#0d1117;border:1px solid #30363d;border-radius:8px;color:#e1e4e8;font-size:14px;margin-bottom:16px;outline:none}
-.login-box input:focus{border-color:#58a6ff}
-.login-box button{width:100%;padding:10px;background:#238636;color:#fff;border:none;border-radius:8px;font-size:14px;cursor:pointer;font-weight:600}
-.login-box button:hover{background:#2ea043}
-.error{color:#f85149;text-align:center;margin-bottom:12px;font-size:13px;display:none}
+html,body{height:100%}
+body{font-family:'Inter',-apple-system,sans-serif;background:var(--bg-0);color:var(--text);min-height:100vh;display:flex;align-items:center;justify-content:center;position:relative;overflow:hidden}
+body::before{content:'';position:fixed;inset:0;z-index:0;pointer-events:none;background:radial-gradient(ellipse 80% 50% at 20% -10%, rgba(34,211,238,0.12), transparent 60%),radial-gradient(ellipse 60% 40% at 100% 0%, rgba(167,139,250,0.08), transparent 50%),radial-gradient(ellipse 50% 50% at 50% 100%, rgba(52,211,153,0.05), transparent 60%)}
+body::after{content:'';position:fixed;inset:0;z-index:0;pointer-events:none;opacity:0.4;background-image:linear-gradient(rgba(120,180,255,0.03) 1px,transparent 1px),linear-gradient(90deg,rgba(120,180,255,0.03) 1px,transparent 1px);background-size:48px 48px;mask-image:radial-gradient(ellipse 70% 60% at 50% 40%,#000 30%,transparent 80%)}
+.login-wrap{position:relative;z-index:1;width:380px;max-width:calc(100vw - 32px)}
+.login-box{background:var(--glass);backdrop-filter:blur(12px);border:1px solid var(--border);border-radius:var(--radius);padding:32px 30px;box-shadow:0 10px 40px rgba(0,0,0,0.4);position:relative;overflow:hidden}
+.login-box::before{content:'';position:absolute;top:0;left:0;right:0;height:1px;background:linear-gradient(90deg,transparent,rgba(34,211,238,0.4),transparent)}
+.brand{display:flex;align-items:center;gap:12px;justify-content:center;margin-bottom:22px}
+.brand-logo{width:38px;height:38px;border-radius:11px;background:linear-gradient(135deg,var(--cyan),#0891b2);display:flex;align-items:center;justify-content:center;box-shadow:0 0 24px var(--cyan-glow),inset 0 1px 0 rgba(255,255,255,0.2);color:#04121a}
+.brand-logo svg{width:20px;height:20px;stroke:currentColor;fill:none}
+.brand-title{font-family:'Syne',sans-serif;font-weight:800;font-size:17px;letter-spacing:-0.02em;text-align:left}
+.brand-sub{font-size:10px;color:var(--text-dim);letter-spacing:0.08em;text-transform:uppercase;margin-top:2px}
+.login-box input{width:100%;padding:10px 14px;background:rgba(7,11,20,0.6);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text);font-size:13px;font-family:inherit;margin-bottom:14px;outline:none;transition:all .18s}
+.login-box input:focus{border-color:var(--cyan);box-shadow:0 0 0 3px rgba(34,211,238,0.1)}
+.login-box button{width:100%;padding:10px;background:linear-gradient(135deg,var(--cyan),#0891b2);border:none;color:#04121a;border-radius:var(--radius-sm);font-size:13px;font-weight:600;cursor:pointer;box-shadow:0 4px 20px var(--cyan-glow);transition:all .18s;font-family:inherit}
+.login-box button:hover{filter:brightness(1.1);transform:translateY(-1px)}
+.login-box button:disabled{opacity:.6;cursor:default;transform:none}
+.error{color:var(--red);text-align:center;margin-bottom:12px;font-size:12px;display:none;font-family:'IBM Plex Mono',monospace}
+.hint{text-align:center;margin-top:14px;font-size:11px;color:var(--text-dim)}
 </style>
 </head>
 <body>
+<div class="login-wrap">
 <div class="login-box">
-<h2>ECH Proxy 管理面板</h2>
+<div class="brand">
+<div class="brand-logo"><svg viewBox="0 0 24 24" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg></div>
+<div><div class="brand-title">ECH Proxy</div><div class="brand-sub">Control Center</div></div>
+</div>
 <div class="error" id="err"></div>
-<input type="password" id="pw" placeholder="请输入管理密码" autofocus>
-<button onclick="doLogin()">登 录</button>
+<input type="password" id="pw" placeholder="请输入管理密码" autofocus autocomplete="current-password">
+<button id="loginBtn" onclick="doLogin()">登 录</button>
+<div class="hint">Control Center · 与内页同一主题</div>
+</div>
 </div>
 <script>
 document.getElementById('pw').addEventListener('keydown',e=>{if(e.key==='Enter')doLogin()});
 async function doLogin(){
 const pw=document.getElementById('pw').value;
 const err=document.getElementById('err');
+const btn=document.getElementById('loginBtn');
+err.style.display='none';
+btn.disabled=true;
 try{
 const r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:pw})});
 const d=await r.json();
 if(d.status==='ok'){location.href='/'}else{err.textContent=d.error||'密码错误';err.style.display='block'}
 }catch(e){err.textContent='网络错误';err.style.display='block'}
+btn.disabled=false;
 }
 </script>
 </body>
@@ -1352,8 +1460,8 @@ func handleAPILogin(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]string{"error": "密码错误"})
 		return
 	}
-	// 生成 session
-	sessionID := fmt.Sprintf("%d", time.Now().UnixNano())
+	// 生成 session（不可预测）
+	sessionID := newSessionID()
 	webSessionsMu.Lock()
 	webSessions[sessionID] = time.Now().Add(7 * 24 * time.Hour)
 	webSessionsMu.Unlock()
@@ -1363,12 +1471,13 @@ func handleAPILogin(w http.ResponseWriter, r *http.Request) {
 		Value:    sessionID,
 		Path:     "/",
 		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
 		MaxAge:   7 * 24 * 3600,
 	})
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
-// handleAPILogout 退出登录
+// handleAPILogout 退出登录（API 返回 JSON，前端再跳 /login）
 func handleAPILogout(w http.ResponseWriter, r *http.Request) {
 	if cookie, err := r.Cookie("ech_session"); err == nil {
 		webSessionsMu.Lock()
@@ -1376,12 +1485,15 @@ func handleAPILogout(w http.ResponseWriter, r *http.Request) {
 		webSessionsMu.Unlock()
 	}
 	http.SetCookie(w, &http.Cookie{
-		Name:   "ech_session",
-		Value:  "",
-		Path:   "/",
-		MaxAge: -1,
+		Name:     "ech_session",
+		Value:    "",
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   -1,
 	})
-	http.Redirect(w, r, "/login", http.StatusFound)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
 // handleIndex 提供 index.html
@@ -1609,7 +1721,7 @@ func handleTraffic(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleLogs 获取日志
+// handleLogs 获取日志（按时间正序返回最近 100 条，前端直接渲染并滚到底）
 func handleLogs(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	logBufferMu.Lock()
@@ -1617,16 +1729,14 @@ func handleLogs(w http.ResponseWriter, r *http.Request) {
 	copy(logs, logBuffer)
 	logBufferMu.Unlock()
 
-	// 返回最新的日志 (倒序)
-	sort.Slice(logs, func(i, j int) bool {
-		return i > j
-	})
-
-	limit := 100
-	if len(logs) < limit {
-		limit = len(logs)
+	// logBuffer 本身已是时间正序，只取尾部最近 100 条，保持正序
+	if len(logs) > 100 {
+		logs = logs[len(logs)-100:]
 	}
-	json.NewEncoder(w).Encode(logs[:limit])
+	if logs == nil {
+		logs = []logEntry{}
+	}
+	json.NewEncoder(w).Encode(logs)
 }
 
 // handleService 服务控制

@@ -10,11 +10,12 @@ import { connect } from 'cloudflare:sockets';
 export default {
   async fetch(request, env, ctx) {
     try {
-      const token = '';
+      // 与客户端默认令牌保持一致（ech-workers.go 默认 token 为 honghongfree），部署时请两端改成相同值
+      const token = 'honghongfree';
       const upgradeHeader = request.headers.get('Upgrade');
-      
+
       if (!upgradeHeader || upgradeHeader.toLowerCase() !== 'websocket') {
-        return new URL(request.url).pathname === '/' 
+        return new URL(request.url).pathname === '/'
           ? new Response('WebSocket Proxy Server', { status: 200 })
           : new Response('Expected WebSocket', { status: 426 });
       }
@@ -23,10 +24,14 @@ export default {
         return new Response('Unauthorized', { status: 401 });
       }
 
+      // 客户端固定出口 IP 通过 ?ip=host[:port] 传递（见 getEffectiveServerAddr），作为回退直连目标
+      const url = new URL(request.url);
+      const fixedIp = url.searchParams.get('ip') || '';
+
       const [client, server] = Object.values(new WebSocketPair());
       server.accept();
-      
-      handleSession(server).catch(() => safeCloseWebSocket(server));
+
+      handleSession(server, fixedIp).catch(() => safeCloseWebSocket(server));
 
       // 修复 spread 类型错误
       const responseInit = {
@@ -46,10 +51,12 @@ export default {
   },
 };
 
-async function handleSession(webSocket) {
+async function handleSession(webSocket, fixedIp = '') {
   let remoteSocket, remoteWriter, remoteReader;
   let isClosed = false;
   let lastActivity = Date.now();
+  // ?ip= 可能带端口（host:port），connect 只需要 host 部分
+  const fixedIpHost = fixedIp ? fixedIp.split(':')[0] : '';
 
   const cleanup = () => {
     if (isClosed) return;
@@ -109,7 +116,8 @@ async function handleSession(webSocket) {
 
   const connectToRemote = async (targetAddr, firstFrameData) => {
     const { host, port } = parseAddress(targetAddr);
-    const attempts = [null, ...CF_FALLBACK_IPS];
+    // 优先直连目标，失败后依次尝试客户端指定的固定出口 IP、内置回退 IP
+    const attempts = [null, ...(fixedIpHost ? [fixedIpHost] : []), ...CF_FALLBACK_IPS];
 
     for (let i = 0; i < attempts.length; i++) {
       try {
