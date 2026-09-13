@@ -9,11 +9,13 @@ services:
       - "9091:9090"
       - "30000:30000"
     volumes:
-      - /ikuai/docker/ECH/data:/data
+      - ech-data:/data
     command: >
       -l 0.0.0.0:30000
       -f hhech.nb1tap.kdns.fr:443
       -token honghongfree
-      -ip 172.64.229.240
       -web :9090
-      -routing global
+      -routing bypass_cn
+
+volumes:
+  ech-data:

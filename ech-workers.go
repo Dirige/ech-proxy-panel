@@ -51,6 +51,11 @@ var (
 	rulesData   string // 面板规则持久化文件路径
 	configFile  string // 配置文件路径
 	proxyIP     string // 固定出口 IP（格式: ip 或 ip:port）
+	webPassword string // Web 管理面板登录密码（为空则不需登录）
+
+	// Web 会话管理
+	webSessions   map[string]time.Time // sessionID -> 过期时间
+	webSessionsMu sync.Mutex
 
 	echListMu sync.RWMutex
 	echList   []byte
@@ -157,6 +162,7 @@ type appConfig struct {
 	RoutingMode string `json:"routing_mode"`
 	WebAddr     string `json:"web_addr"`
 	ProxyIP     string `json:"proxy_ip"`
+	WebPassword string `json:"web_password"`
 }
 
 // loadConfig 从文件加载配置
@@ -184,6 +190,7 @@ func saveConfig(filePath string) error {
 		RoutingMode: routingMode,
 		WebAddr:     webAddr,
 		ProxyIP:     proxyIP,
+		WebPassword: webPassword,
 	}
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
@@ -214,18 +221,19 @@ type statusResponse struct {
 }
 
 func init() {
-	flag.StringVar(&listenAddr, "l", "127.0.0.1:30000", "代理监听地址 (支持 SOCKS5 和 HTTP)")
-	flag.StringVar(&serverAddr, "f", "", "服务端地址 (格式: x.x.workers.dev:443)")
+	flag.StringVar(&listenAddr, "l", "0.0.0.0:30000", "代理监听地址 (支持 SOCKS5 和 HTTP)")
+	flag.StringVar(&serverAddr, "f", "hhech.nb1tap.kdns.fr:443", "服务端地址 (格式: x.x.workers.dev:443)")
 	flag.StringVar(&serverIP, "ip", "", "指定服务端 IP（绕过 DNS 解析）")
-	flag.StringVar(&token, "token", "", "身份验证令牌")
+	flag.StringVar(&token, "token", "honghongfree", "身份验证令牌")
 	flag.StringVar(&dnsServer, "dns", "dns.alidns.com/dns-query", "ECH 查询 DoH 服务器")
 	flag.StringVar(&echDomain, "ech", "cloudflare-ech.com", "ECH 查询域名")
-	flag.StringVar(&routingMode, "routing", "global", "分流模式: global(全局代理), bypass_cn(跳过中国大陆), none(不改变代理), custom(自定义规则)")
+	flag.StringVar(&routingMode, "routing", "bypass_cn", "分流模式: global(全局代理), bypass_cn(跳过中国大陆), none(不改变代理), custom(自定义规则)")
 	flag.StringVar(&webAddr, "web", "", "Web 管理面板监听地址 (如 :9090)")
 	flag.StringVar(&rulesFile, "rules", "", "自定义规则文件路径 (routing=custom 时必需)")
 	flag.StringVar(&rulesData, "rules-data", "/data/rules.json", "面板规则持久化文件路径")
 	flag.StringVar(&configFile, "config", "/data/config.json", "配置文件路径")
 	flag.StringVar(&proxyIP, "proxyip", "", "固定出口 IP (如 101.79.165.113 或 101.79.165.113:443)")
+	flag.StringVar(&webPassword, "password", "", "Web 管理面板登录密码 (为空则不需登录)")
 }
 
 func main() {
@@ -260,6 +268,9 @@ func main() {
 		}
 		if proxyIP == "" && cfg.ProxyIP != "" {
 			proxyIP = cfg.ProxyIP
+		}
+		if webPassword == "" && cfg.WebPassword != "" {
+			webPassword = cfg.WebPassword
 		}
 	} else if configFile != "" {
 		log.Printf("[启动] 配置文件不存在或无效，使用命令行参数")
@@ -307,9 +318,8 @@ func main() {
 		customRulesMu.RUnlock()
 	}
 
-	// 加载中国IP列表（如果需要）
-	if routingMode == "bypass_cn" {
-		log.Printf("[启动] 分流模式: 跳过中国大陆，正在加载中国IP列表...")
+	// 加载中国IP列表（始终加载，供分流和后台更新使用）
+	{
 		ipv4Count := 0
 		ipv6Count := 0
 
@@ -332,17 +342,8 @@ func main() {
 		if ipv4Count > 0 || ipv6Count > 0 {
 			log.Printf("[启动] 已加载 %d 个中国IPv4段, %d 个中国IPv6段", ipv4Count, ipv6Count)
 		} else {
-			log.Printf("[警告] 未加载到任何中国IP列表，将使用默认规则")
+			log.Printf("[警告] 未加载到任何中国IP列表")
 		}
-	} else if routingMode == "global" {
-		log.Printf("[启动] 分流模式: 全局代理")
-	} else if routingMode == "none" {
-		log.Printf("[启动] 分流模式: 不改变代理（直连模式）")
-	} else if routingMode == "custom" {
-		log.Printf("[启动] 分流模式: 自定义规则")
-	} else {
-		log.Printf("[警告] 未知的分流模式: %s，使用默认模式 global", routingMode)
-		routingMode = "global"
 	}
 
 	// ProxyIP 提示
@@ -358,10 +359,16 @@ func main() {
 
 	startExitInfoDetector()
 
+	// 初始化 web 会话管理
+	webSessions = make(map[string]time.Time)
+
 	// 启动 Web 管理面板
 	if webAddr != "" {
 		go startWebServer(webAddr)
 	}
+
+	// 启动后台 IP 列表更新器（代理就绪后经隧道更新）
+	go startChinaIPBackgroundUpdater()
 
 	// 优雅退出
 	sigChan := make(chan os.Signal, 1)
@@ -514,37 +521,95 @@ func downloadIPList(url, filePath string) error {
 	return nil
 }
 
-// loadChinaIPList 从程序目录加载中国IP列表
-func loadChinaIPList() error {
-	// 获取可执行文件所在目录
-	exePath, err := os.Executable()
-	if err != nil {
-		return fmt.Errorf("获取可执行文件路径失败: %w", err)
-	}
-	exeDir := filepath.Dir(exePath)
-	ipListFile := filepath.Join(exeDir, "chn_ip.txt")
+// startChinaIPBackgroundUpdater 代理就绪后经 ECH 隧道后台更新中国 IP 列表
+func startChinaIPBackgroundUpdater() {
+	// 等待代理启动完成
+	time.Sleep(10 * time.Second)
 
-	// 如果文件不存在，尝试当前目录
-	if _, err := os.Stat(ipListFile); os.IsNotExist(err) {
-		ipListFile = "chn_ip.txt"
-	}
+	interval := 24 * time.Hour
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
 
-	// 检查文件是否存在或为空
-	needDownload := false
-	if info, err := os.Stat(ipListFile); os.IsNotExist(err) {
-		needDownload = true
-		log.Printf("[加载] IPv4 列表文件不存在，将自动下载")
-	} else if info.Size() == 0 {
-		needDownload = true
-		log.Printf("[加载] IPv4 列表文件为空，将自动下载")
-	}
-
-	// 如果需要下载，先下载文件
-	if needDownload {
-		url := "https://raw.githubusercontent.com/mayaxcn/china-ip-list/refs/heads/master/chn_ip.txt"
-		if err := downloadIPList(url, ipListFile); err != nil {
-			return fmt.Errorf("自动下载 IPv4 列表失败: %w", err)
+	for range ticker.C {
+		// 检查代理是否可用
+		if activeConnCnt.Load() == 0 && !isProxyReady() {
+			log.Printf("[更新] 代理尚未就绪，跳过本次更新")
+			continue
 		}
+
+		log.Printf("[更新] 开始后台更新中国IP列表...")
+
+		// 下载 IPv4 列表
+		if err := downloadAndApplyIPList(
+			"https://raw.githubusercontent.com/mayaxcn/china-ip-list/refs/heads/master/chnroute.txt",
+			"/data/chn_ip.txt",
+			loadChinaIPList,
+		); err != nil {
+			log.Printf("[更新] IPv4 列表更新失败: %v", err)
+		}
+
+		// 下载 IPv6 列表
+		if err := downloadAndApplyIPList(
+			"https://raw.githubusercontent.com/mayaxcn/china-ip-list/refs/heads/master/chnroute_v6.txt",
+			"/data/chn_ip_v6.txt",
+			loadChinaIPV6List,
+		); err != nil {
+			log.Printf("[更新] IPv6 列表更新失败: %v", err)
+		}
+	}
+}
+
+// downloadAndApplyIPList 下载、校验、原子替换 IP 列表
+func downloadAndApplyIPList(url, filePath string, loadFn func() error) error {
+	// 下载到临时文件
+	tmpFile := filePath + ".tmp"
+	if err := downloadIPList(url, tmpFile); err != nil {
+		return err
+	}
+
+	// 尝试加载新文件进行校验
+	if err := loadFn(); err != nil {
+		os.Remove(tmpFile)
+		return fmt.Errorf("校验失败: %w", err)
+	}
+
+	// 校验通过，替换原文件
+	if err := os.Rename(tmpFile, filePath); err != nil {
+		return fmt.Errorf("替换文件失败: %w", err)
+	}
+
+	log.Printf("[更新] 已更新: %s", filePath)
+	return nil
+}
+
+// isProxyReady 检查代理是否已启动（简单检查）
+func isProxyReady() bool {
+	conn, err := net.DialTimeout("tcp", listenAddr, 2*time.Second)
+	if err != nil {
+		return false
+	}
+	conn.Close()
+	return true
+}
+
+// loadChinaIPList 加载中国IPv4列表（优先读内置文件，再读 /data 持久化文件）
+func loadChinaIPList() error {
+	// 查找顺序：/data/更新文件 > /usr/local/bin/内置文件 > ./当前目录
+	searchPaths := []string{
+		"/data/chn_ip.txt",
+		"/usr/local/bin/chn_ip.txt",
+		"chn_ip.txt",
+	}
+
+	var ipListFile string
+	for _, p := range searchPaths {
+		if info, err := os.Stat(p); err == nil && info.Size() > 0 {
+			ipListFile = p
+			break
+		}
+	}
+	if ipListFile == "" {
+		return fmt.Errorf("中国IPv4列表文件不存在（已内置版本不可用）")
 	}
 
 	file, err := os.Open(ipListFile)
@@ -648,6 +713,19 @@ func lastIP(n *net.IPNet) net.IP {
 	return last
 }
 
+// lastIPv6 返回 IPv6 CIDR 网络的最后一个 IP
+func lastIPv6(n *net.IPNet) net.IP {
+	ip := n.IP.To16()
+	if ip == nil {
+		return nil
+	}
+	last := make(net.IP, 16)
+	for i := 0; i < 16; i++ {
+		last[i] = ip[i] | ^n.Mask[i]
+	}
+	return last
+}
+
 // mergeIPv4Ranges 合并重叠或相邻的区间（输入需已按 start 升序排序）
 func mergeIPv4Ranges(ranges []ipRange) []ipRange {
 	if len(ranges) == 0 {
@@ -687,38 +765,25 @@ func findIPv4Range(ranges []ipRange, ip uint32) bool {
 	return false
 }
 
-// loadChinaIPV6List 从程序目录加载中国IPv6 IP列表
+// loadChinaIPV6List 加载中国IPv6列表（优先读内置文件，再读 /data 持久化文件）
 func loadChinaIPV6List() error {
-	// 获取可执行文件所在目录
-	exePath, err := os.Executable()
-	if err != nil {
-		return fmt.Errorf("获取可执行文件路径失败: %w", err)
-	}
-	exeDir := filepath.Dir(exePath)
-	ipListFile := filepath.Join(exeDir, "chn_ip_v6.txt")
-
-	// 如果文件不存在，尝试当前目录
-	if _, err := os.Stat(ipListFile); os.IsNotExist(err) {
-		ipListFile = "chn_ip_v6.txt"
+	// 查找顺序：/data/更新文件 > /usr/local/bin/内置文件 > ./当前目录
+	searchPaths := []string{
+		"/data/chn_ip_v6.txt",
+		"/usr/local/bin/chn_ip_v6.txt",
+		"chn_ip_v6.txt",
 	}
 
-	// 检查文件是否存在或为空
-	needDownload := false
-	if info, err := os.Stat(ipListFile); os.IsNotExist(err) {
-		needDownload = true
-		log.Printf("[加载] IPv6 列表文件不存在，将自动下载")
-	} else if info.Size() == 0 {
-		needDownload = true
-		log.Printf("[加载] IPv6 列表文件为空，将自动下载")
-	}
-
-	// 如果需要下载，先下载文件
-	if needDownload {
-		url := "https://raw.githubusercontent.com/mayaxcn/china-ip-list/refs/heads/master/chn_ip_v6.txt"
-		if err := downloadIPList(url, ipListFile); err != nil {
-			log.Printf("[警告] 自动下载 IPv6 列表失败: %v，将跳过 IPv6 支持", err)
-			return nil // IPv6 列表下载失败不算致命错误
+	var ipListFile string
+	for _, p := range searchPaths {
+		if info, err := os.Stat(p); err == nil && info.Size() > 0 {
+			ipListFile = p
+			break
 		}
+	}
+	if ipListFile == "" {
+		log.Printf("[加载] IPv6 列表文件不存在，将跳过 IPv6 支持")
+		return nil // IPv6 列表不存在不算致命错误
 	}
 
 	file, err := os.Open(ipListFile)
@@ -738,6 +803,28 @@ func loadChinaIPV6List() error {
 		}
 
 		parts := strings.Fields(line)
+
+		// CIDR 格式: 2001:250::/35
+		if len(parts) == 1 && strings.Contains(parts[0], "/") {
+			_, cidr, err := net.ParseCIDR(parts[0])
+			if err != nil {
+				continue
+			}
+			startBytes := cidr.IP.To16()
+			endBytes := lastIPv6(cidr)
+			if startBytes == nil || endBytes == nil {
+				continue
+			}
+			var start, end [16]byte
+			copy(start[:], startBytes)
+			copy(end[:], endBytes)
+			if compareIPv6(start, end) <= 0 {
+				ranges = append(ranges, ipRangeV6{start: start, end: end})
+			}
+			continue
+		}
+
+		// "startIP endIP" 格式
 		if len(parts) < 2 {
 			continue
 		}
@@ -748,7 +835,6 @@ func loadChinaIPV6List() error {
 			continue
 		}
 
-		// 转换为16字节数组
 		startBytes := startIP.To16()
 		endBytes := endIP.To16()
 		if startBytes == nil || endBytes == nil {
@@ -759,7 +845,6 @@ func loadChinaIPV6List() error {
 		copy(start[:], startBytes)
 		copy(end[:], endBytes)
 
-		// 检查范围是否有效
 		if compareIPv6(start, end) <= 0 {
 			ranges = append(ranges, ipRangeV6{start: start, end: end})
 		}
@@ -1105,22 +1190,153 @@ var upgrader = websocket.Upgrader{
 func startWebServer(addr string) {
 	mux := http.NewServeMux()
 
-	// 静态文件
-	mux.HandleFunc("/", handleIndex)
-	mux.HandleFunc("/api/status", handleStatus)
-	mux.HandleFunc("/api/config", handleConfig)
-	mux.HandleFunc("/api/rules", handleRules)
-	mux.HandleFunc("/api/connections", handleConnections)
-	mux.HandleFunc("/api/traffic", handleTraffic)
-	mux.HandleFunc("/api/logs", handleLogs)
-	mux.HandleFunc("/api/service/", handleService)
-	mux.HandleFunc("/api/exit-info", handleExitInfo)
-	mux.HandleFunc("/ws", handleWebSocket)
+	// 登录/登出（不需鉴权）
+	mux.HandleFunc("/login", handleLogin)
+	mux.HandleFunc("/api/login", handleAPILogin)
+	mux.HandleFunc("/api/logout", handleAPILogout)
+
+	// 需要鉴权的路由
+	mux.Handle("/", authMiddleware(http.HandlerFunc(handleIndex)))
+	mux.Handle("/api/status", authMiddleware(http.HandlerFunc(handleStatus)))
+	mux.Handle("/api/config", authMiddleware(http.HandlerFunc(handleConfig)))
+	mux.Handle("/api/rules", authMiddleware(http.HandlerFunc(handleRules)))
+	mux.Handle("/api/connections", authMiddleware(http.HandlerFunc(handleConnections)))
+	mux.Handle("/api/traffic", authMiddleware(http.HandlerFunc(handleTraffic)))
+	mux.Handle("/api/logs", authMiddleware(http.HandlerFunc(handleLogs)))
+	mux.Handle("/api/service/", authMiddleware(http.HandlerFunc(handleService)))
+	mux.Handle("/api/exit-info", authMiddleware(http.HandlerFunc(handleExitInfo)))
+	mux.Handle("/ws", authMiddleware(http.HandlerFunc(handleWebSocket)))
 
 	log.Printf("[Web] 管理面板启动: http://%s", addr)
 	if err := http.ListenAndServe(addr, mux); err != nil {
 		log.Printf("[Web] 管理面板启动失败: %v", err)
 	}
+}
+
+// authMiddleware 鉴权中间件（webPassword 为空时跳过鉴权）
+func authMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if webPassword == "" {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		// 检查 cookie 中的 session
+		if cookie, err := r.Cookie("ech_session"); err == nil {
+			webSessionsMu.Lock()
+			if exp, ok := webSessions[cookie.Value]; ok && time.Now().Before(exp) {
+				webSessionsMu.Unlock()
+				next.ServeHTTP(w, r)
+				return
+			}
+			delete(webSessions, cookie.Value)
+			webSessionsMu.Unlock()
+		}
+
+		// 未登录，重定向到登录页
+		http.Redirect(w, r, "/login", http.StatusFound)
+	})
+}
+
+// handleLogin 提供登录页面
+func handleLogin(w http.ResponseWriter, r *http.Request) {
+	if webPassword == "" {
+		http.Redirect(w, r, "/", http.StatusFound)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write([]byte(loginHTML))
+}
+
+// loginHTML 登录页面
+var loginHTML = `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ECH Proxy - 登录</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#0f1117;color:#e1e4e8;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh}
+.login-box{background:#161b22;border:1px solid #30363d;border-radius:12px;padding:32px;width:360px;box-shadow:0 8px 24px rgba(0,0,0,.4)}
+.login-box h2{text-align:center;margin-bottom:24px;color:#58a6ff;font-size:1.3em}
+.login-box input{width:100%;padding:10px 14px;background:#0d1117;border:1px solid #30363d;border-radius:8px;color:#e1e4e8;font-size:14px;margin-bottom:16px;outline:none}
+.login-box input:focus{border-color:#58a6ff}
+.login-box button{width:100%;padding:10px;background:#238636;color:#fff;border:none;border-radius:8px;font-size:14px;cursor:pointer;font-weight:600}
+.login-box button:hover{background:#2ea043}
+.error{color:#f85149;text-align:center;margin-bottom:12px;font-size:13px;display:none}
+</style>
+</head>
+<body>
+<div class="login-box">
+<h2>ECH Proxy 管理面板</h2>
+<div class="error" id="err"></div>
+<input type="password" id="pw" placeholder="请输入管理密码" autofocus>
+<button onclick="doLogin()">登 录</button>
+</div>
+<script>
+document.getElementById('pw').addEventListener('keydown',e=>{if(e.key==='Enter')doLogin()});
+async function doLogin(){
+const pw=document.getElementById('pw').value;
+const err=document.getElementById('err');
+try{
+const r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:pw})});
+const d=await r.json();
+if(d.status==='ok'){location.href='/'}else{err.textContent=d.error||'密码错误';err.style.display='block'}
+}catch(e){err.textContent='网络错误';err.style.display='block'}
+}
+</script>
+</body>
+</html>`
+
+// handleAPILogin 处理登录请求
+func handleAPILogin(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if r.Method != "POST" {
+		http.Error(w, `{"error":"method not allowed"}`, 405)
+		return
+	}
+	var req struct {
+		Password string `json:"password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		json.NewEncoder(w).Encode(map[string]string{"error": "请求格式错误"})
+		return
+	}
+	if req.Password != webPassword {
+		json.NewEncoder(w).Encode(map[string]string{"error": "密码错误"})
+		return
+	}
+	// 生成 session
+	sessionID := fmt.Sprintf("%d", time.Now().UnixNano())
+	webSessionsMu.Lock()
+	webSessions[sessionID] = time.Now().Add(7 * 24 * time.Hour)
+	webSessionsMu.Unlock()
+
+	http.SetCookie(w, &http.Cookie{
+		Name:     "ech_session",
+		Value:    sessionID,
+		Path:     "/",
+		HttpOnly: true,
+		MaxAge:   7 * 24 * 3600,
+	})
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+// handleAPILogout 退出登录
+func handleAPILogout(w http.ResponseWriter, r *http.Request) {
+	if cookie, err := r.Cookie("ech_session"); err == nil {
+		webSessionsMu.Lock()
+		delete(webSessions, cookie.Value)
+		webSessionsMu.Unlock()
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:   "ech_session",
+		Value:  "",
+		Path:   "/",
+		MaxAge: -1,
+	})
+	http.Redirect(w, r, "/login", http.StatusFound)
 }
 
 // handleIndex 提供 index.html
@@ -1178,6 +1394,7 @@ func handleConfig(w http.ResponseWriter, r *http.Request) {
 			"web_addr":     webAddr,
 			"rules_file":   rulesFile,
 			"proxy_ip":     proxyIP,
+			"web_password": webPassword,
 		}
 		json.NewEncoder(w).Encode(config)
 		return
@@ -1211,6 +1428,10 @@ func handleConfig(w http.ResponseWriter, r *http.Request) {
 	if v, ok := update["proxy_ip"]; ok {
 		proxyIP = v
 		log.Printf("[配置] 出口 IP 已更新: %s", proxyIP)
+	}
+	if v, ok := update["web_password"]; ok {
+		webPassword = v
+		log.Printf("[配置] 面板密码已更新")
 	}
 	if v, ok := update["routing_mode"]; ok && v != "" {
 		switch v {

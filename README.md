@@ -2,205 +2,114 @@
 
 基于 [byJoey/ech-wk](https://github.com/byJoey/ech-wk) 二次修改，增加了 Web 管理面板和部分功能。
 
-> 原项目是一个跨平台 ECH Workers 代理客户端。本项目在其基础上新增了 Web 面板、实时流量统计、自定义分流规则、出口 IP/COLO 检测等功能，更适合在软路由上通过 Docker 部署使用。
+> 免费 ECH 节点由 [Telegram 频道](https://t.me/honghongtg) 提供，感谢维护！
+>
+> 本项目仅在原项目基础上补充了 Web 面板、流量统计、分流规则、出口检测等客户端功能，Cloudflare Worker 服务端保持不动。
 
-## 新增功能
+## 功能
 
-- Web 管理面板（暗色主题）
-- 实时上传/下载速度 + 总流量统计（代理 + 直连流量合计）
-- 活跃连接列表
-- 简化的分流规则（直连域名 / 代理域名）
-- 出口 IP 和 CF 落地节点（COLO）自动检测
-- 固定出口 IP（ProxyIP）支持
-- 配置持久化（config.json），重启不丢失
-- 规则持久化（rules.json），重启不丢失
-- 日志实时查看
-- 内存使用监控
+- **SOCKS5 + HTTP 代理**：统一监听，自动识别
+- **分流模式**：`bypass_cn`（默认，跳过中国大陆）/ `global` / `none` / `custom`
+- **自定义规则**：Web 面板增删直连/代理域名，支持 `*.example.com` 通配符和子域名匹配
+- **Web 管理面板**：暗色主题，概览/连接/规则/配置四个页面
+- **实时监控**：上传下载速度、总流量、活跃连接、内存、出口 IP/COLO、延迟
+- **登录鉴权**：可选密码保护（不设密码则无需登录）
+- **配置持久化**：`/data/config.json` + `/data/rules.json`，重启不丢失
+- **中国 IP 列表**：内置 CIDR 格式快照，启动后经 ECH 隧道后台自动更新
 
-## Docker 部署
+## 快速开始
 
-### 拉取镜像
+### Docker（推荐）
 
 ```bash
-docker pull ghcr.io/dirige/ech-proxy-panel:latest
+docker run -d --name ech-proxy --restart always \
+  -p 30000:30000 -p 9091:9090 \
+  -v ech-data:/data \
+  ghcr.io/dirige/ech-proxy-panel:latest
 ```
 
-### 首次部署
+首次运行使用内置默认配置（`hhech.nb1tap.kdns.fr:443` / `honghongfree`），打开 `http://你的IP:9091` 管理。
+
+### Docker Compose
 
 ```bash
-docker run -d \
-  --name ech-proxy \
-  --restart always \
-  -p 9090:9090 \
-  -p 30000:30000 \
+docker compose up -d
+```
+
+### 自定义参数
+
+```bash
+docker run -d --name ech-proxy --restart always \
+  -p 30000:30000 -p 9091:9090 \
   -v ech-data:/data \
   ghcr.io/dirige/ech-proxy-panel:latest \
-  -l 0.0.0.0:30000 \
   -f 你的服务地址:443 \
   -token 你的令牌 \
   -web :9090 \
-  -routing global
-```
-
-首次运行后配置自动保存，后续重启直接：
-
-```bash
-docker restart ech-proxy
+  -routing bypass_cn \
+  -password 你的管理密码
 ```
 
 ### 参数说明
 
-| 参数 | 必填 | 说明 | 示例 |
-|------|------|------|------|
-| `-f` | 是 | 服务端地址 | `-f xxx.workers.dev:443` |
-| `-token` | 否 | 身份验证令牌 | `-token your-token` |
-| `-l` | 否 | 代理监听地址（默认 `127.0.0.1:30000`） | `-l 0.0.0.0:30000` |
-| `-ip` | 否 | 优选 IP / 域名 | `-ip 172.64.229.240` |
-| `-web` | 否 | 管理面板端口 | `-web :9090` |
-| `-routing` | 否 | 分流模式 | `-routing global` |
-| `-dns` | 否 | DoH 服务器 | `-dns dns.alidns.com/dns-query` |
-| `-ech` | 否 | ECH 域名 | `-ech cloudflare-ech.com` |
-| `-proxyip` | 否 | 固定出口 IP | `-proxyip 101.79.165.113:443` |
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `-f` | `hhech.nb1tap.kdns.fr:443` | 服务端地址（服务端由 Cloudflare Worker 提供） |
+| `-token` | `honghongfree` | 身份验证令牌 |
+| `-l` | `0.0.0.0:30000` | 代理监听地址 |
+| `-ip` | （自动） | 优选 IP / 域名 |
+| `-web` | （空） | Web 管理面板地址，如 `:9090` |
+| `-routing` | `bypass_cn` | 分流模式 |
+| `-dns` | `dns.alidns.com/dns-query` | DoH 服务器 |
+| `-ech` | `cloudflare-ech.com` | ECH 查询域名 |
+| `-proxyip` | （空） | 固定出口 IP，如 `101.79.165.113:443` |
+| `-password` | （空） | 面板登录密码，留空无需登录 |
 
 ### 分流模式
 
 | 模式 | 说明 |
 |------|------|
-| `global` | 全局代理（默认） |
-| `bypass_cn` | 跳过中国大陆 |
-| `none` | 不改变（直连） |
-| `custom` | 自定义规则（需配合 `-rules` 参数） |
+| `bypass_cn` | **默认**。中国 IP 直连，其他走 ECH 代理 |
+| `global` | 全局代理 |
+| `none` | 全部直连 |
+| `custom` | 自定义规则优先，无匹配时走代理 |
 
-## 爱快 Docker 部署（桥接模式）
+### 自定义规则
 
-### 步骤 1：拉取镜像
+在 Web 面板「规则」页面添加，或编辑 `/data/rules.json`：
 
-```bash
-docker pull ghcr.io/dirige/ech-proxy-panel:latest
+```
+domain,baidu.com,direct
+domain,google.com,proxy
+domain,*.255432.xyz,proxy
 ```
 
-### 步骤 2：首次部署（传参数）
+- `domain`：精确匹配 + 子域名匹配（`255432.xyz` 会匹配 `emos.255432.xyz`）
+- `*.domain`：通配符写法，效果同上
+- 自定义规则在**所有分流模式**下优先生效
 
-```bash
-docker run -d \
-  --name ech-proxy \
-  --restart always \
-  -p 9091:9090 \
-  -p 30000:30000 \
-  -v ech-data:/data \
-  ghcr.io/dirige/ech-proxy-panel:latest \
-  -l 0.0.0.0:30000 \
-  -f 你的服务地址:443 \
-  -token 你的令牌 \
-  -web :9090 \
-  -routing global
-```
-
-> 面板端口映射为 `9091`（爱快上 9090 常被占用），访问地址为 `http://爱快IP:9091`。
-
-### 步骤 3：后续重启
-
-配置已保存，无需再传参数：
-
-```bash
-docker restart ech-proxy
-```
-
-### 步骤 4：修改配置
+## 部署后修改配置
 
 **方式一：Web 面板**
 
-浏览器打开 `http://爱快IP:9091`，在「配置」页面修改，点保存。
+打开 `http://你的IP:9091`，在「配置」页面修改后保存。
 
-**方式二：手动编辑配置文件**
+**方式二：编辑配置文件**
 
 ```bash
 docker exec -it ech-proxy vi /data/config.json
 docker restart ech-proxy
 ```
 
-### 配置文件模板
+## 服务端说明
 
-`/data/config.json`（仓库中的 `config.example.json` 即模板，复制后填入真实值）：
+本项目只包含客户端。服务端为 Cloudflare Worker（`_worker.js`），将 WebSocket 流量转发到 ECH 入口。
 
-```json
-{
-  "listen_addr": "0.0.0.0:30000",
-  "server_addr": "你的服务地址:443",
-  "server_ip": "172.64.229.240",
-  "token": "你的令牌",
-  "dns_server": "dns.alidns.com/dns-query",
-  "ech_domain": "cloudflare-ech.com",
-  "routing_mode": "global",
-  "web_addr": ":9090",
-  "proxy_ip": ""
-}
-```
-
-字段说明：
-
-| 字段 | 说明 | 示例 |
-|------|------|------|
-| `listen_addr` | 代理监听地址 | `0.0.0.0:30000` |
-| `server_addr` | 服务端地址 | `xxx.workers.dev:443` |
-| `server_ip` | 优选 IP（留空自动分配） | `172.64.229.240` |
-| `token` | 认证令牌 | `your-token` |
-| `dns_server` | DoH 服务器 | `dns.alidns.com/dns-query` |
-| `ech_domain` | ECH 域名 | `cloudflare-ech.com` |
-| `routing_mode` | 分流模式 | `global` / `bypass_cn` / `none` / `custom` |
-| `web_addr` | 管理面板端口 | `:9090` |
-| `proxy_ip` | 固定出口 IP（留空自动分配） | `101.79.165.113:443` |
-
-### 固定出口 IP
-
-在 config.json 中设置 `proxy_ip` 字段，或在 Web 面板「配置」页面修改。
-
-### 自定义规则文件
-
-创建规则文件，每行一条：
-
-```
-domain,baidu.com,direct
-domain,google.com,proxy
-domain,github.com,proxy
-```
-
-格式：`domain,域名,动作`（动作：`direct` 直连 / `proxy` 代理）
-
-> domain 规则匹配逻辑：
-> - `255432.xyz`：精确匹配本身 + 所有子域名（如 `emos.255432.xyz`）
-> - `*.255432.xyz`：通配符写法，同样匹配本身 + 所有子域名
-
-挂载到容器：
-
-```bash
-docker run -d \
-  --name ech-proxy \
-  --restart always \
-  -p 9090:9090 \
-  -p 30000:30000 \
-  -v ech-data:/data \
-  -v /path/to/rules.txt:/etc/rules.txt \
-  ghcr.io/dirige/ech-proxy-panel:latest \
-  -l 0.0.0.0:30000 \
-  -f 你的服务地址:443 \
-  -token 你的令牌 \
-  -web :9090 \
-  -routing custom \
-  -rules /etc/rules.txt
-```
-
-## 管理面板
-
-部署后访问 `http://你的IP:9090`，面板包含：
-
-- **概览**：上传/下载速度、总量、活动连接、内存、出口 IP、COLO、网络延迟
-- **连接**：当前活跃连接列表
-- **规则**：直连域名 / 代理域名管理
-- **配置**：分流模式、固定出口 IP、DoH、ECH 域名等
+项目内 `_worker.js` 仅供参考，部署时请使用你自己的 Worker 实例。
 
 ## 致谢
 
 - 原项目：[byJoey/ech-wk](https://github.com/byJoey/ech-wk)
-- 原始代码来源：[CF_NAT](https://t.me/CF_NAT)
+- 免费 ECH 节点：[Telegram @honghongtg](https://t.me/honghongtg)
 - 中国 IP 列表：[mayaxcn/china-ip-list](https://github.com/mayaxcn/china-ip-list)
+- 原始代码来源：[CF_NAT](https://t.me/CF_NAT)
