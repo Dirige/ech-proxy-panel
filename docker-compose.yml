@@ -10,12 +10,11 @@ services:
       - "30000:30000"
     volumes:
       - ech-data:/data
-    command: >
-      -l 0.0.0.0:30000
-      -f hhech.nb1tap.kdns.fr:443
-      -token honghongfree
-      -web :9090
-      -routing bypass_cn
+    environment:
+      - ECH_SERVER=hhech.nb1tap.kdns.fr:443
+      - ECH_TOKEN=honghongfree
+      - ECH_ROUTING=bypass_cn
+      - ECH_WEB=:9090
 
 volumes:
   ech-data:

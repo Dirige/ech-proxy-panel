@@ -236,22 +236,67 @@ func init() {
 	flag.StringVar(&webPassword, "password", "", "Web 管理面板登录密码 (为空则不需登录)")
 }
 
+// applyEnvDefaults 从环境变量加载默认值（命令行参数优先）
+// 支持: ECH_LISTEN, ECH_SERVER, ECH_SERVER_IP, ECH_TOKEN, ECH_DNS, ECH_DOMAIN,
+//        ECH_ROUTING, ECH_WEB, ECH_PROXY_IP, ECH_PASSWORD, ECH_CONFIG, ECH_RULES_DATA
+func applyEnvDefaults() {
+	if v := os.Getenv("ECH_LISTEN"); v != "" && listenAddr == "0.0.0.0:30000" {
+		listenAddr = v
+	}
+	if v := os.Getenv("ECH_SERVER"); v != "" && serverAddr == "hhech.nb1tap.kdns.fr:443" {
+		serverAddr = v
+	}
+	if v := os.Getenv("ECH_SERVER_IP"); v != "" && serverIP == "" {
+		serverIP = v
+	}
+	if v := os.Getenv("ECH_TOKEN"); v != "" && token == "honghongfree" {
+		token = v
+	}
+	if v := os.Getenv("ECH_DNS"); v != "" && dnsServer == "dns.alidns.com/dns-query" {
+		dnsServer = v
+	}
+	if v := os.Getenv("ECH_DOMAIN"); v != "" && echDomain == "cloudflare-ech.com" {
+		echDomain = v
+	}
+	if v := os.Getenv("ECH_ROUTING"); v != "" && routingMode == "bypass_cn" {
+		routingMode = v
+	}
+	if v := os.Getenv("ECH_WEB"); v != "" && webAddr == "" {
+		webAddr = v
+	}
+	if v := os.Getenv("ECH_PROXY_IP"); v != "" && proxyIP == "" {
+		proxyIP = v
+	}
+	if v := os.Getenv("ECH_PASSWORD"); v != "" && webPassword == "" {
+		webPassword = v
+	}
+	if v := os.Getenv("ECH_CONFIG"); v != "" && configFile == "/data/config.json" {
+		configFile = v
+	}
+	if v := os.Getenv("ECH_RULES_DATA"); v != "" && rulesData == "/data/rules.json" {
+		rulesData = v
+	}
+}
+
 func main() {
 	flag.Parse()
 
-	// 加载配置文件（命令行参数优先）
+	// 环境变量（命令行参数优先，环境变量其次，config.json 最后）
+	applyEnvDefaults()
+
+	// 加载配置文件（命令行参数 > 环境变量 > config.json）
 	if cfg, err := loadConfig(configFile); err == nil {
 		log.Printf("[启动] 已加载配置文件: %s", configFile)
-		if listenAddr == "127.0.0.1:30000" && cfg.ListenAddr != "" {
+		if listenAddr == "0.0.0.0:30000" && cfg.ListenAddr != "" {
 			listenAddr = cfg.ListenAddr
 		}
-		if serverAddr == "" && cfg.ServerAddr != "" {
+		if serverAddr == "hhech.nb1tap.kdns.fr:443" && cfg.ServerAddr != "" {
 			serverAddr = cfg.ServerAddr
 		}
 		if serverIP == "" && cfg.ServerIP != "" {
 			serverIP = cfg.ServerIP
 		}
-		if token == "" && cfg.Token != "" {
+		if token == "honghongfree" && cfg.Token != "" {
 			token = cfg.Token
 		}
 		if dnsServer == "dns.alidns.com/dns-query" && cfg.DNSServer != "" {
@@ -260,7 +305,7 @@ func main() {
 		if echDomain == "cloudflare-ech.com" && cfg.ECHDomain != "" {
 			echDomain = cfg.ECHDomain
 		}
-		if routingMode == "global" && cfg.RoutingMode != "" {
+		if routingMode == "bypass_cn" && cfg.RoutingMode != "" {
 			routingMode = cfg.RoutingMode
 		}
 		if webAddr == "" && cfg.WebAddr != "" {

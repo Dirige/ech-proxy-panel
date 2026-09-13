@@ -38,6 +38,8 @@ docker compose up -d
 
 ### 自定义参数
 
+**方式一：命令行参数**
+
 ```bash
 docker run -d --name ech-proxy --restart always \
   -p 30000:30000 -p 9091:9090 \
@@ -50,20 +52,38 @@ docker run -d --name ech-proxy --restart always \
   -password 你的管理密码
 ```
 
+**方式二：环境变量**
+
+```bash
+docker run -d --name ech-proxy --restart always \
+  -p 30000:30000 -p 9091:9090 \
+  -v ech-data:/data \
+  -e ECH_SERVER=你的服务地址:443 \
+  -e ECH_TOKEN=你的令牌 \
+  -e ECH_ROUTING=bypass_cn \
+  -e ECH_WEB=:9090 \
+  -e ECH_PASSWORD=你的管理密码 \
+  ghcr.io/dirige/ech-proxy-panel:latest
+```
+
+**优先级**：命令行参数 > 环境变量 > config.json
+
 ### 参数说明
 
-| 参数 | 默认值 | 说明 |
-|------|--------|------|
-| `-f` | `hhech.nb1tap.kdns.fr:443` | 服务端地址（服务端由 Cloudflare Worker 提供） |
-| `-token` | `honghongfree` | 身份验证令牌 |
-| `-l` | `0.0.0.0:30000` | 代理监听地址 |
-| `-ip` | （自动） | 优选 IP / 域名 |
-| `-web` | （空） | Web 管理面板地址，如 `:9090` |
-| `-routing` | `bypass_cn` | 分流模式 |
-| `-dns` | `dns.alidns.com/dns-query` | DoH 服务器 |
-| `-ech` | `cloudflare-ech.com` | ECH 查询域名 |
-| `-proxyip` | （空） | 固定出口 IP，如 `101.79.165.113:443` |
-| `-password` | （空） | 面板登录密码，留空无需登录 |
+| 参数 | 环境变量 | 默认值 | 说明 |
+|------|----------|--------|------|
+| `-f` | `ECH_SERVER` | `hhech.nb1tap.kdns.fr:443` | 服务端地址 |
+| `-token` | `ECH_TOKEN` | `honghongfree` | 身份验证令牌 |
+| `-l` | `ECH_LISTEN` | `0.0.0.0:30000` | 代理监听地址 |
+| `-ip` | `ECH_SERVER_IP` | （自动） | 优选 IP / 域名 |
+| `-web` | `ECH_WEB` | （空） | Web 管理面板地址，如 `:9090` |
+| `-routing` | `ECH_ROUTING` | `bypass_cn` | 分流模式 |
+| `-dns` | `ECH_DNS` | `dns.alidns.com/dns-query` | DoH 服务器 |
+| `-ech` | `ECH_DOMAIN` | `cloudflare-ech.com` | ECH 查询域名 |
+| `-proxyip` | `ECH_PROXY_IP` | （空） | 固定出口 IP |
+| `-password` | `ECH_PASSWORD` | （空） | 面板登录密码 |
+| `-config` | `ECH_CONFIG` | `/data/config.json` | 配置文件路径 |
+| `-rules-data` | `ECH_RULES_DATA` | `/data/rules.json` | 规则持久化路径 |
 
 ### 分流模式
 
