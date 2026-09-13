@@ -398,6 +398,16 @@ body::after{
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/></svg>
         刷新
       </button>
+      <button class="btn" id="conn-pause-btn" onclick="toggleConnPause()">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
+        暂停
+      </button>
+      <select id="conn-interval" onchange="changeConnInterval()" style="padding:6px 8px;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#e1e4e8;font-size:12px">
+        <option value="1000">1 秒</option>
+        <option value="3000" selected>3 秒</option>
+        <option value="5000">5 秒</option>
+        <option value="10000">10 秒</option>
+      </select>
     </div>
     <div class="table-wrap">
       <table class="table">
@@ -496,8 +506,31 @@ body::after{
 function toast(msg){const t=document.getElementById('toast');t.textContent=msg;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),2200)}
 
 let connRefreshTimer = null;
-function startConnRefresh(){stopConnRefresh();connRefreshTimer=setInterval(()=>{if(document.getElementById('page-connections').classList.contains('active'))loadConnections()},3000)}
+let connPaused = false;
+let connIntervalMs = 3000;
+function startConnRefresh(){
+  stopConnRefresh();
+  if(connPaused) return;
+  connRefreshTimer=setInterval(()=>{
+    if(!connPaused && document.getElementById('page-connections').classList.contains('active'))loadConnections()
+  },connIntervalMs);
+}
 function stopConnRefresh(){if(connRefreshTimer){clearInterval(connRefreshTimer);connRefreshTimer=null}}
+function toggleConnPause(){
+  connPaused=!connPaused;
+  const btn=document.getElementById('conn-pause-btn');
+  if(connPaused){
+    stopConnRefresh();
+    btn.innerHTML='<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5,3 19,12 5,21"/></svg> 继续';
+  }else{
+    startConnRefresh();
+    btn.innerHTML='<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg> 暂停';
+  }
+}
+function changeConnInterval(){
+  connIntervalMs=parseInt(document.getElementById('conn-interval').value);
+  if(!connPaused) startConnRefresh();
+}
 
 function switchPage(pg){
   document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));
