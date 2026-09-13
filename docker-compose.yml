@@ -3,18 +3,15 @@ version: '3.8'
 services:
   ech-proxy:
     image: ghcr.io/dirige/ech-proxy-panel:latest
-    container_name: ech-proxy
+    container_name: ech
     restart: always
     ports:
-      - "9091:9090"
+      - "30001:9090"
       - "30000:30000"
     volumes:
-      - ech-data:/data
+      - ./data:/data
     environment:
       - ECH_SERVER=hhech.nb1tap.kdns.fr:443
       - ECH_TOKEN=honghongfree
       - ECH_ROUTING=bypass_cn
       - ECH_WEB=:9090
-
-volumes:
-  ech-data:

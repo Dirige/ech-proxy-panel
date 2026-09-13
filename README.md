@@ -22,13 +22,13 @@
 ### Docker（推荐）
 
 ```bash
-docker run -d --name ech-proxy --restart always \
-  -p 30000:30000 -p 9091:9090 \
-  -v ech-data:/data \
+docker run -d --name ech --restart always \
+  -p 30000:30000 -p 30001:9090 \
+  -v ./data:/data \
   ghcr.io/dirige/ech-proxy-panel:latest
 ```
 
-首次运行使用内置默认配置（`hhech.nb1tap.kdns.fr:443` / `honghongfree`），打开 `http://你的IP:9091` 管理。
+首次运行使用内置默认配置（`hhech.nb1tap.kdns.fr:443` / `honghongfree`），打开 `http://你的IP:30001` 管理。
 
 ### Docker Compose
 
