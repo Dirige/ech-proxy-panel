@@ -26,6 +26,7 @@ import (
 	"reflect"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -54,6 +55,10 @@ var (
 	configFile  string // 配置文件路径
 	proxyIP     string // 固定出口 IP（格式: ip 或 ip:port）
 	webPassword string // Web 管理面板登录密码（为空则不需登录）
+
+	// ========== 长连接（视频）稳定性相关 ==========
+	downLimitMbps float64       // 单连接下行限速（Mbps），0 = 不限速
+	idleTimeout   time.Duration // 隧道空闲超时（无任何数据交互多久后主动关闭），0 = 不主动关闭
 
 	// Web 会话管理
 	webSessions   map[string]time.Time // sessionID -> 过期时间
@@ -165,6 +170,9 @@ type appConfig struct {
 	WebAddr     string `json:"web_addr"`
 	ProxyIP     string `json:"proxy_ip"`
 	WebPassword string `json:"web_password"`
+	// 长连接（视频）稳定性
+	DownLimitMbps float64 `json:"down_limit_mbps"` // 单连接下行限速（Mbps），0 = 不限速
+	IdleTimeoutMin float64 `json:"idle_timeout_min"` // 隧道空闲超时（分钟），0 = 不主动关闭
 }
 
 // loadConfig 从文件加载配置
@@ -193,6 +201,8 @@ func saveConfig(filePath string) error {
 		WebAddr:     webAddr,
 		ProxyIP:     proxyIP,
 		WebPassword: webPassword,
+		DownLimitMbps: downLimitMbps,
+		IdleTimeoutMin: idleTimeout.Minutes(),
 	}
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
@@ -236,6 +246,8 @@ func init() {
 	flag.StringVar(&configFile, "config", "/data/config.json", "配置文件路径")
 	flag.StringVar(&proxyIP, "proxyip", "", "固定出口 IP (如 101.79.165.113 或 101.79.165.113:443)")
 	flag.StringVar(&webPassword, "password", "", "Web 管理面板登录密码 (为空则不需登录)")
+	flag.Float64Var(&downLimitMbps, "downlimit", 0, "单连接下行限速 Mbps (0=不限)。看视频卡顿时建议设为码率的 1.2~1.5 倍")
+	flag.DurationVar(&idleTimeout, "idle-timeout", 15*time.Minute, "隧道空闲超时，无任何数据交互超过该时长则关闭 (0=永不主动关闭)")
 }
 
 // applyEnvDefaults 从环境变量加载默认值（命令行参数优先）
@@ -278,6 +290,16 @@ func applyEnvDefaults() {
 	if v := os.Getenv("ECH_RULES_DATA"); v != "" && rulesData == "/data/rules.json" {
 		rulesData = v
 	}
+	if v := os.Getenv("ECH_DOWN_LIMIT"); v != "" && downLimitMbps == 0 {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			downLimitMbps = f
+		}
+	}
+	if v := os.Getenv("ECH_IDLE_TIMEOUT"); v != "" && idleTimeout == 15*time.Minute {
+		if d, err := time.ParseDuration(v); err == nil {
+			idleTimeout = d
+		}
+	}
 }
 
 func main() {
@@ -318,6 +340,12 @@ func main() {
 		}
 		if webPassword == "" && cfg.WebPassword != "" {
 			webPassword = cfg.WebPassword
+		}
+		if downLimitMbps == 0 && cfg.DownLimitMbps > 0 {
+			downLimitMbps = cfg.DownLimitMbps
+		}
+		if idleTimeout == 15*time.Minute && cfg.IdleTimeoutMin > 0 {
+			idleTimeout = time.Duration(cfg.IdleTimeoutMin * float64(time.Minute))
 		}
 	} else if configFile != "" {
 		log.Printf("[启动] 配置文件不存在或无效，使用命令行参数")
@@ -2377,6 +2405,12 @@ func runProxyServer(addr string) {
 
 	log.Printf("[代理] 服务器启动: %s (支持 SOCKS5 和 HTTP)", addr)
 	log.Printf("[代理] 后端服务器: %s", serverAddr)
+	if downLimitMbps > 0 {
+		log.Printf("[代理] 单连接下行限速: %.1f Mbps", downLimitMbps)
+	}
+	if idleTimeout > 0 {
+		log.Printf("[代理] 隧道空闲超时: %s", idleTimeout)
+	}
 	if serverIP != "" {
 		log.Printf("[代理] 使用固定 IP: %s", serverIP)
 	}
@@ -2827,6 +2861,62 @@ const (
 	modeHTTPProxy   = 3 // HTTP 普通代理（GET/POST等）
 )
 
+// writeQueueSize 下行待写队列长度（以消息为单位，每条最大约 64KB）
+// 只用来吸收短时间的写阻塞，过大会白白占用本地内存并破坏 TCP 背压的及时性
+const writeQueueSize = 192
+
+// tokenBucket 单连接下行限速器（令牌桶）
+type tokenBucket struct {
+	mu     sync.Mutex
+	tokens float64
+	rate   float64 // bytes/s
+	burst  float64 // bytes
+	last   time.Time
+}
+
+// newTokenBucket 按 Mbps 创建限速器，mbps <= 0 时返回 nil（表示不限速）
+func newTokenBucket(mbps float64) *tokenBucket {
+	if mbps <= 0 {
+		return nil
+	}
+	rate := mbps * 125000 // Mbps -> bytes/s
+	burst := rate * 0.5   // 允许 0.5 秒的突发，避免限速把首帧缓冲拖慢
+	if burst < 65536 {
+		burst = 65536
+	}
+	return &tokenBucket{tokens: burst, rate: rate, burst: burst, last: time.Now()}
+}
+
+// wait 阻塞直到凑够 n 字节的配额
+func (tb *tokenBucket) wait(n int) {
+	if tb == nil || tb.rate <= 0 {
+		return
+	}
+	for {
+		tb.mu.Lock()
+		now := time.Now()
+		if d := now.Sub(tb.last).Seconds(); d > 0 {
+			tb.tokens += tb.rate * d
+			if tb.tokens > tb.burst {
+				tb.tokens = tb.burst
+			}
+			tb.last = now
+		}
+		if tb.tokens >= float64(n) {
+			tb.tokens -= float64(n)
+			tb.mu.Unlock()
+			return
+		}
+		deficit := float64(n) - tb.tokens
+		sleep := time.Duration(deficit / tb.rate * float64(time.Second))
+		tb.mu.Unlock()
+		if sleep <= 0 {
+			sleep = time.Millisecond
+		}
+		time.Sleep(sleep)
+	}
+}
+
 func handleTunnel(conn net.Conn, target, clientAddr string, mode int, firstFrame string) error {
 	// 解析目标地址
 	targetHost, _, err := net.SplitHostPort(target)
@@ -2863,20 +2953,34 @@ func handleTunnel(conn net.Conn, target, clientAddr string, mode int, firstFrame
 
 	var mu sync.Mutex
 	var closed atomic.Bool
+	stopCh := make(chan struct{}) // cleanup 时广播，用于唤醒被 channel 阻塞的 goroutine
 	closeOnce := sync.Once{}
 	cleanup := func() {
 		closeOnce.Do(func() {
 			closed.Store(true)
+			select {
+			case <-stopCh:
+			default:
+				close(stopCh)
+			}
 			wsConn.Close()
 			conn.Close()
 		})
 	}
 	defer cleanup()
 
-	// 保活 + WebSocket 读取/写入超时管理
-	wsConn.SetReadDeadline(time.Now().Add(120 * time.Second))
+	// ========== 保活与活性判定 ==========
+	// 刻意不使用 gorilla 的 SetReadDeadline 作为长连接的读超时：
+	// 视频播放器缓冲填满后会停止读取数据，此时 Server->Client 会阻塞在 conn.Write 上，
+	// 于是再也没人调用 ReadMessage，read deadline 到期就会把一条仍在正常使用的隧道误杀，
+	// 而 ping/pong 也救不了（pong 只在 ReadMessage 调用期间才会被处理）。
+	// 改用统一的空闲计时器：任一方向有数据流动就续期，真正持续空闲才判定为死连接。
+	var lastActive atomic.Int64 // UnixNano
+	touch := func() { lastActive.Store(time.Now().UnixNano()) }
+	touch()
+
 	wsConn.SetPongHandler(func(string) error {
-		wsConn.SetReadDeadline(time.Now().Add(120 * time.Second))
+		touch()
 		return nil
 	})
 
@@ -2900,6 +3004,30 @@ func handleTunnel(conn net.Conn, target, clientAddr string, mode int, firstFrame
 		}
 	}()
 	defer close(stopPing)
+
+	// 空闲超时巡检：比 read deadline 更准确地表达"这条连接已经没人用了"
+	stopIdle := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				if idleTimeout <= 0 {
+					continue
+				}
+				last := lastActive.Load()
+				if last > 0 && time.Since(time.Unix(0, last)) > idleTimeout && !closed.Load() {
+					log.Printf("[代理] %s 空闲超过 %s，关闭隧道", clientAddr, idleTimeout)
+					cleanup()
+					return
+				}
+			case <-stopIdle:
+				return
+			}
+		}
+	}()
+	defer close(stopIdle)
 
 	conn.SetDeadline(time.Time{})
 
@@ -2925,13 +3053,17 @@ func handleTunnel(conn net.Conn, target, clientAddr string, mode int, firstFrame
 		return err
 	}
 
-	// 等待响应
+	// 等待响应（握手阶段仍保留读超时，避免连不上时永久挂住）
+	wsConn.SetReadDeadline(time.Now().Add(20 * time.Second))
 	_, msg, err := wsConn.ReadMessage()
 	if err != nil {
 		removeConn(connID)
 		sendErrorResponse(conn, mode)
 		return err
 	}
+	// 握手完成后取消底层读超时，长连接的活性改由上面的空闲计时器负责
+	wsConn.SetReadDeadline(time.Time{})
+	touch()
 
 	response := string(msg)
 	if strings.HasPrefix(response, "ERROR:") {
@@ -2954,11 +3086,16 @@ func handleTunnel(conn net.Conn, target, clientAddr string, mode int, firstFrame
 	log.Printf("[代理] %s 已连接: %s", clientAddr, target)
 
 	// 双向转发
-	done := make(chan struct{})
+	// done 必须是带缓冲的，且发送方用阻塞发送：
+	// 下面恰好有 2 个协程各自发送一次（Client->Server、排空 writeQueue 的写协程），
+	// 缓冲 2 保证两次发送都不会阻塞；只要有一个协程结束，主协程就能立刻收尾。
+	// 切勿改回 select/default —— 那等于允许信号被丢弃，两个协程若都先于主协程退出，
+	// 主协程会永久阻塞在 <-done 上，cleanup 永不执行，连接与 goroutine 全部泄漏。
+	done := make(chan struct{}, 2)
 
 	// Client -> Server
 	go func() {
-		defer func() { select { case done <- struct{}{}: default: } }()
+		defer func() { done <- struct{}{} }()
 		buf := make([]byte, 65536)
 		for {
 			n, err := conn.Read(buf)
@@ -2977,6 +3114,7 @@ func handleTunnel(conn net.Conn, target, clientAddr string, mode int, firstFrame
 			}
 
 			connInfoPtr.upload.Add(int64(n))
+			touch()
 
 			mu.Lock()
 			wsConn.SetWriteDeadline(time.Now().Add(30 * time.Second))
@@ -2990,8 +3128,16 @@ func handleTunnel(conn net.Conn, target, clientAddr string, mode int, firstFrame
 	}()
 
 	// Server -> Client
+	// 这里把「读 WebSocket」和「写给本地连接」拆到两个 goroutine，中间用一个有界队列衔接。
+	// 原因：播放器缓冲填满后停止读取时，conn.Write 会长时间阻塞。若读写在同一 goroutine，
+	// 阻塞期间就没人去读 WebSocket，上层链路完全停摆，且错过 pong 处理。
+	// 队列有界（见 writeQueueSize），写不进去时读侧也会阻塞，TCP 背压仍然能传导到源站。
+	writeQueue := make(chan []byte, writeQueueSize)
+
 	go func() {
-		defer func() { select { case done <- struct{}{}: default: } }()
+		// 注意：这里不主动通知 done。读侧结束时只关闭队列，由写侧把队列排空后再收尾，
+		// 否则服务端发完数据就关 WS（HTTP 响应结束的常见形态）时，尾部数据会被截掉。
+		defer close(writeQueue)
 		for {
 			mt, msg, err := wsConn.ReadMessage()
 			if err != nil {
@@ -3001,7 +3147,7 @@ func handleTunnel(conn net.Conn, target, clientAddr string, mode int, firstFrame
 				return
 			}
 
-			wsConn.SetReadDeadline(time.Now().Add(120 * time.Second))
+			touch()
 
 			if mt == websocket.TextMessage {
 				if string(msg) == "CLOSE" {
@@ -3011,6 +3157,23 @@ func handleTunnel(conn net.Conn, target, clientAddr string, mode int, firstFrame
 
 			connInfoPtr.download.Add(int64(len(msg)))
 
+			// gorilla 的 ReadMessage 每次返回独立分配的切片，可安全交给另一个 goroutine
+			select {
+			case writeQueue <- msg:
+			case <-stopCh:
+				return
+			}
+		}
+	}()
+
+	// 下行限速器：按单连接平滑输出，避免短时间内把大量数据推向播放器，
+	// 从而在 worker 侧的 send 队列里堆积（Cloudflare 每条 WS 单独限资源，堆积后 GC 压力会让吞吐持续下降）
+	limiter := newTokenBucket(downLimitMbps)
+
+	go func() {
+		defer func() { done <- struct{}{} }()
+		for msg := range writeQueue {
+			limiter.wait(len(msg))
 			written := 0
 			for written < len(msg) {
 				n, err := conn.Write(msg[written:])
@@ -3103,11 +3266,12 @@ func handleDirectConnection(conn net.Conn, target, clientAddr string, mode int, 
 	}
 
 	// 双向转发
-	done := make(chan struct{})
+	// done 带缓冲 + 阻塞发送，理由同 handleTunnel：下面恰好 2 个发送方，缓冲 2 保证不会阻塞。
+	done := make(chan struct{}, 2)
 
 	// Client -> Target
 	go func() {
-		defer func() { select { case done <- struct{}{}: default: } }()
+		defer func() { done <- struct{}{} }()
 		buf := make([]byte, 65536)
 		for {
 			n, err := conn.Read(buf)
@@ -3128,7 +3292,7 @@ func handleDirectConnection(conn net.Conn, target, clientAddr string, mode int, 
 
 	// Target -> Client
 	go func() {
-		defer func() { select { case done <- struct{}{}: default: } }()
+		defer func() { done <- struct{}{} }()
 		buf := make([]byte, 65536)
 		for {
 			n, err := targetConn.Read(buf)

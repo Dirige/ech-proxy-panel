@@ -86,6 +86,8 @@ docker run -d --name ech-proxy --restart always \
 | `ECH_DOMAIN`  | `-ech`       | `cloudflare-ech.com`      | ECH 查询域名         |
 | `ECH_PROXY_IP` | `-proxyip`  | （空）                    | 固定出口 IP          |
 | `ECH_PASSWORD` | `-password` | （空）                    | 面板登录密码         |
+| `ECH_DOWN_LIMIT` | `-downlimit` | `0`                     | 单连接下行限速 Mbps（`0`=不限） |
+| `ECH_IDLE_TIMEOUT` | `-idle-timeout` | `15m`              | 隧道空闲超时（`0`=永不主动关闭） |
 
 优先级：**命令行参数 > 环境变量 > config.json**。
 
@@ -126,6 +128,31 @@ docker run -d --name ech-proxy --restart always \
 docker exec -it ech-proxy vi /data/config.json
 docker restart ech-proxy
 ```
+
+---
+
+### 视频卡顿 / 单条连接跑到 1GB 后降速
+
+这套架构是 **一条本地连接 = 一条 WebSocket = Worker 的一次 invocation**，全程不换。
+Cloudflare 的资源配额是**按 invocation 计**的，所以同一条连接搬运的数据越多，那条 invocation
+累积的 CPU 消耗和发送队列就越多，表现就是：**不断流，但吞吐逐步下降、开始缓冲**。
+
+判断方法：卡顿时**别关掉，直接再开一路**。新的一路立刻流畅 → 是这条 invocation 老化；
+新的一路也一样慢 → 是这个节点 / CF 出口 IP 那个时段拥塞，换节点或错峰。
+
+可用的缓解手段：
+
+| 手段 | 做法 |
+| ---- | ---- |
+| 下行限速（推荐先试） | `-downlimit 15`，设为视频码率的 **1.2~1.5 倍**。限速后播放器始终能立即消费，worker 侧的发送队列不会堆积，这条 invocation 就不容易老化 |
+| 应用层分片 | Emby 等播放器改用 HLS/转码分片，每个分片是独立请求 = 独立 invocation，不会撞累积上限 |
+| 换出口 / 换节点 | `-proxyip` 或改 `ECH_SERVER`，换一份全新的 invocation 资源 |
+| 空闲超时兜底 | `-idle-timeout` 默认 15 分钟，卡死的长连接会被自动回收 |
+
+> 注：如果服务端 Worker 是你自己部署的，还可以直接改服务端：
+> `_worker.js` 里发送前检查 `webSocket.getBufferedAmount()` 做背压，
+> 并把 Worker 的 `limits.cpu_ms` 调到 300000（默认只有 30s）。
+> 用免费节点时这两项改不了，只能在客户端侧按上表处理。
 
 ---
 
