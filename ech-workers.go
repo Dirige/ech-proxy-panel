@@ -72,6 +72,12 @@ var (
 	envSet     = map[string]string{} // config.json 键名 -> 提供该值的环境变量名（存在即为已设置）
 	fromConfig = map[string]bool{}   // 最终采用了 config.json 取值的键名
 
+	// 配置文件本次启动的加载结果，直接回给面板。
+	// 存在的意义：用户排查"配置改了不生效"时，面板顶栏必须能一句话回答
+	// "这个文件到底读到了没有、没读到是为什么"，而不是让他自己去猜日志。
+	// 取值："已加载" / "读取失败: <底层错误>"。
+	configStatus = "未读取"
+
 	// Web 会话管理
 	webSessions   map[string]time.Time // sessionID -> 过期时间
 	webSessionsMu sync.Mutex
@@ -498,10 +504,15 @@ func main() {
 	cfg, cfgErr := loadConfig(configFile)
 	if cfgErr == nil {
 		log.Printf("[启动] 已加载配置文件: %s", configFile)
+		configStatus = "已加载"
 		applyConfigFile(cfg)
 	} else if configFile != "" {
 		// 把底层错误也打出来：挂载权限不对 / 目录只读时，用户能立刻看到真正原因
+		configStatus = fmt.Sprintf("读取失败: %v", cfgErr)
 		log.Printf("[启动] 配置文件 %s 读取失败，本次仅使用命令行参数与环境变量: %v", configFile, cfgErr)
+	}
+	if configStatus != "已加载" {
+		log.Printf("[警告] 本次启动没有任何一项取值来自配置文件 %s —— 面板上改这个文件不会生效。请检查该路径在容器内是否存在、内容是否为合法 JSON。", configFile)
 	}
 
 	// 打印每个字段的最终取值与来源：配置"改了却不生效"时可一眼看出是谁覆盖了谁
@@ -1881,6 +1892,7 @@ func handleConfig(w http.ResponseWriter, r *http.Request) {
 		}
 		config["_source"] = sources
 		config["_config_file"] = configFile
+		config["_config_status"] = configStatus
 		config["_rules_file"] = rulesData
 		json.NewEncoder(w).Encode(config)
 		return
