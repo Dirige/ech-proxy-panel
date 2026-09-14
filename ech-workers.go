@@ -60,6 +60,12 @@ var (
 	downLimitMbps float64       // 单连接下行限速（Mbps），0 = 不限速
 	idleTimeout   time.Duration // 隧道空闲超时（无任何数据交互多久后主动关闭），0 = 不主动关闭
 
+	// 标记上面两项是否已被「命令行参数 / 环境变量」显式指定。
+	// 用于解决"显式设置的 0 被当成没设置"的问题：只有当标记为 false 时才允许 config.json 覆盖。
+	// 由 main() 中的 flag.Visit 与 applyEnvDefaults 维护。
+	downLimitSet   bool
+	idleTimeoutSet bool
+
 	// Web 会话管理
 	webSessions   map[string]time.Time // sessionID -> 过期时间
 	webSessionsMu sync.Mutex
@@ -158,21 +164,24 @@ type customRule struct {
 	Action string `json:"action"` // proxy, direct
 }
 
-// appConfig 应用配置
+// appConfig 应用配置。
+// 长连接两项用指针：必须区分「config.json 里没有这个键」(nil) 和「显式设为 0」——
+// -downlimit 0（不限速）与 -idle-timeout 0（永不主动关闭）都是有意义的设置，
+// 用 float64 的零值无法表达"未设置"。
 type appConfig struct {
-	ListenAddr  string `json:"listen_addr"`
-	ServerAddr  string `json:"server_addr"`
-	ServerIP    string `json:"server_ip"`
-	Token       string `json:"token"`
-	DNSServer   string `json:"dns_server"`
-	ECHDomain   string `json:"ech_domain"`
-	RoutingMode string `json:"routing_mode"`
-	WebAddr     string `json:"web_addr"`
-	ProxyIP     string `json:"proxy_ip"`
-	WebPassword string `json:"web_password"`
+	ListenAddr     string   `json:"listen_addr"`
+	ServerAddr     string   `json:"server_addr"`
+	ServerIP       string   `json:"server_ip"`
+	Token          string   `json:"token"`
+	DNSServer      string   `json:"dns_server"`
+	ECHDomain      string   `json:"ech_domain"`
+	RoutingMode    string   `json:"routing_mode"`
+	WebAddr        string   `json:"web_addr"`
+	ProxyIP        string   `json:"proxy_ip"`
+	WebPassword    string   `json:"web_password"`
 	// 长连接（视频）稳定性
-	DownLimitMbps float64 `json:"down_limit_mbps"` // 单连接下行限速（Mbps），0 = 不限速
-	IdleTimeoutMin float64 `json:"idle_timeout_min"` // 隧道空闲超时（分钟），0 = 不主动关闭
+	DownLimitMbps  *float64 `json:"down_limit_mbps"`  // 单连接下行限速（Mbps），0 = 不限速
+	IdleTimeoutMin *float64 `json:"idle_timeout_min"` // 隧道空闲超时（分钟），0 = 不主动关闭
 }
 
 // loadConfig 从文件加载配置
@@ -190,19 +199,21 @@ func loadConfig(filePath string) (*appConfig, error) {
 
 // saveConfig 保存配置到文件
 func saveConfig(filePath string) error {
+	downLimit := downLimitMbps
+	idleMin := idleTimeout.Minutes()
 	cfg := appConfig{
-		ListenAddr:  listenAddr,
-		ServerAddr:  serverAddr,
-		ServerIP:    serverIP,
-		Token:       token,
-		DNSServer:   dnsServer,
-		ECHDomain:   echDomain,
-		RoutingMode: routingMode,
-		WebAddr:     webAddr,
-		ProxyIP:     proxyIP,
-		WebPassword: webPassword,
-		DownLimitMbps: downLimitMbps,
-		IdleTimeoutMin: idleTimeout.Minutes(),
+		ListenAddr:     listenAddr,
+		ServerAddr:     serverAddr,
+		ServerIP:       serverIP,
+		Token:          token,
+		DNSServer:      dnsServer,
+		ECHDomain:      echDomain,
+		RoutingMode:    routingMode,
+		WebAddr:        webAddr,
+		ProxyIP:        proxyIP,
+		WebPassword:    webPassword,
+		DownLimitMbps:  &downLimit,
+		IdleTimeoutMin: &idleMin,
 	}
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
@@ -252,7 +263,8 @@ func init() {
 
 // applyEnvDefaults 从环境变量加载默认值（命令行参数优先）
 // 支持: ECH_LISTEN, ECH_SERVER, ECH_SERVER_IP, ECH_TOKEN, ECH_DNS, ECH_DOMAIN,
-//        ECH_ROUTING, ECH_WEB, ECH_PROXY_IP, ECH_PASSWORD, ECH_CONFIG, ECH_RULES_DATA
+//        ECH_ROUTING, ECH_WEB, ECH_PROXY_IP, ECH_PASSWORD, ECH_CONFIG, ECH_RULES_DATA,
+//        ECH_DOWN_LIMIT, ECH_IDLE_TIMEOUT
 func applyEnvDefaults() {
 	if v := os.Getenv("ECH_LISTEN"); v != "" && listenAddr == "0.0.0.0:30000" {
 		listenAddr = v
@@ -290,20 +302,36 @@ func applyEnvDefaults() {
 	if v := os.Getenv("ECH_RULES_DATA"); v != "" && rulesData == "/data/rules.json" {
 		rulesData = v
 	}
-	if v := os.Getenv("ECH_DOWN_LIMIT"); v != "" && downLimitMbps == 0 {
+	// 这里判断的是 downLimitSet / idleTimeoutSet（命令行是否显式给出），而不是
+	// "值是否等于默认值"——否则 -downlimit 0 / -idle-timeout 0 会被当成没设置，被环境变量顶掉。
+	if v := os.Getenv("ECH_DOWN_LIMIT"); v != "" && !downLimitSet {
 		if f, err := strconv.ParseFloat(v, 64); err == nil {
 			downLimitMbps = f
+			downLimitSet = true
 		}
 	}
-	if v := os.Getenv("ECH_IDLE_TIMEOUT"); v != "" && idleTimeout == 15*time.Minute {
+	if v := os.Getenv("ECH_IDLE_TIMEOUT"); v != "" && !idleTimeoutSet {
 		if d, err := time.ParseDuration(v); err == nil {
 			idleTimeout = d
+			idleTimeoutSet = true
 		}
 	}
 }
 
 func main() {
 	flag.Parse()
+
+	// 先用 flag.Visit 记录哪些参数是命令行**显式**给出的。
+	// 不能用"值是否等于默认值"来判断，否则 -downlimit 0 / -idle-timeout 0 会被误判成"未设置"，
+	// 用户特意设置的 0 就会被环境变量或 config.json 覆盖掉。
+	flag.Visit(func(f *flag.Flag) {
+		switch f.Name {
+		case "downlimit":
+			downLimitSet = true
+		case "idle-timeout":
+			idleTimeoutSet = true
+		}
+	})
 
 	// 环境变量（命令行参数优先，环境变量其次，config.json 最后）
 	applyEnvDefaults()
@@ -341,11 +369,15 @@ func main() {
 		if webPassword == "" && cfg.WebPassword != "" {
 			webPassword = cfg.WebPassword
 		}
-		if downLimitMbps == 0 && cfg.DownLimitMbps > 0 {
-			downLimitMbps = cfg.DownLimitMbps
+		// 只有命令行/环境变量都没显式给出时才采用 config.json 的值。
+		// 用指针判断「键是否存在」，这样配置里写 0（不限速/不主动关闭）也能正确生效。
+		if !downLimitSet && cfg.DownLimitMbps != nil {
+			downLimitMbps = *cfg.DownLimitMbps
+			downLimitSet = true
 		}
-		if idleTimeout == 15*time.Minute && cfg.IdleTimeoutMin > 0 {
-			idleTimeout = time.Duration(cfg.IdleTimeoutMin * float64(time.Minute))
+		if !idleTimeoutSet && cfg.IdleTimeoutMin != nil {
+			idleTimeout = time.Duration(*cfg.IdleTimeoutMin * float64(time.Minute))
+			idleTimeoutSet = true
 		}
 	} else if configFile != "" {
 		log.Printf("[启动] 配置文件不存在或无效，使用命令行参数")
@@ -378,7 +410,6 @@ func main() {
 
 	// 设置日志同时写入缓冲区
 	log.SetOutput(&logWriter{original: os.Stderr})
-	log.Printf("[测试] 日志系统已初始化")
 
 	// 加载自定义规则
 	if routingMode == "custom" {
@@ -619,6 +650,7 @@ func startChinaIPBackgroundUpdater() {
 		if err := downloadAndApplyIPList(
 			"https://raw.githubusercontent.com/mayaxcn/china-ip-list/refs/heads/master/chnroute.txt",
 			"/data/chn_ip.txt",
+			validateChinaIPListFile,
 			loadChinaIPList,
 		); err != nil {
 			log.Printf("[更新] IPv4 列表更新失败: %v", err)
@@ -628,6 +660,7 @@ func startChinaIPBackgroundUpdater() {
 		if err := downloadAndApplyIPList(
 			"https://raw.githubusercontent.com/mayaxcn/china-ip-list/refs/heads/master/chnroute_v6.txt",
 			"/data/chn_ip_v6.txt",
+			validateChinaIPV6ListFile,
 			loadChinaIPV6List,
 		); err != nil {
 			log.Printf("[更新] IPv6 列表更新失败: %v", err)
@@ -635,16 +668,48 @@ func startChinaIPBackgroundUpdater() {
 	}
 }
 
-// downloadAndApplyIPList 下载、校验、原子替换 IP 列表
-func downloadAndApplyIPList(url, filePath string, loadFn func() error) error {
+// errIPListSuspect 表示列表内容可疑（下载损坏或被劫持），调用方应丢弃该文件。
+// 用 errors.Is(err, errIPListSuspect) 判断，避免把"可疑内容"和"IO 失败"混为一谈。
+var errIPListSuspect = errors.New("IP列表内容可疑")
+
+// chinaIPListSearchPaths 中国 IPv4 列表查找顺序：/data 更新文件 > 内置文件 > 当前目录
+var chinaIPListSearchPaths = []string{
+	"/data/chn_ip.txt",
+	"/usr/local/bin/chn_ip.txt",
+	"chn_ip.txt",
+}
+
+// chinaIPV6ListSearchPaths 中国 IPv6 列表查找顺序
+var chinaIPV6ListSearchPaths = []string{
+	"/data/chn_ip_v6.txt",
+	"/usr/local/bin/chn_ip_v6.txt",
+	"chn_ip_v6.txt",
+}
+
+// findFirstIPListFile 返回第一个存在且非空的文件路径，找不到返回 ""
+func findFirstIPListFile(paths []string) string {
+	for _, p := range paths {
+		if info, err := os.Stat(p); err == nil && info.Size() > 0 {
+			return p
+		}
+	}
+	return ""
+}
+
+// downloadAndApplyIPList 下载、校验、原子替换 IP 列表。
+//
+// 注意 validate 必须校验**刚下载的临时文件**：早先这里传的是 loadChinaIPList，
+// 而它会按 /data/chn_ip.txt → 内置文件 的顺序查找，此时新内容还在 .tmp 里，
+// 于是校验的其实是上一版旧文件，校验形同虚设（损坏或被劫持的新列表要等下次重启才暴露）。
+func downloadAndApplyIPList(url, filePath string, validate func(path string) error, apply func() error) error {
 	// 下载到临时文件
 	tmpFile := filePath + ".tmp"
 	if err := downloadIPList(url, tmpFile); err != nil {
 		return err
 	}
 
-	// 尝试加载新文件进行校验
-	if err := loadFn(); err != nil {
+	// 直接解析临时文件做校验（不读旧文件、不改全局状态）
+	if err := validate(tmpFile); err != nil {
 		os.Remove(tmpFile)
 		return fmt.Errorf("校验失败: %w", err)
 	}
@@ -654,7 +719,31 @@ func downloadAndApplyIPList(url, filePath string, loadFn func() error) error {
 		return fmt.Errorf("替换文件失败: %w", err)
 	}
 
+	// 替换成功后重新加载，让新列表立即生效
+	if err := apply(); err != nil {
+		return fmt.Errorf("加载新列表失败: %w", err)
+	}
+
 	log.Printf("[更新] 已更新: %s", filePath)
+	return nil
+}
+
+// validateChinaIPListFile 校验刚下载的 IPv4 列表（直接解析该文件本身）
+func validateChinaIPListFile(path string) error {
+	_, err := parseChinaIPListFile(path)
+	return err
+}
+
+// validateChinaIPV6ListFile 校验刚下载的 IPv6 列表。
+// 与加载路径不同，这里要求必须有有效条目——下载到空内容/垃圾内容属于失败。
+func validateChinaIPV6ListFile(path string) error {
+	ranges, err := parseChinaIPV6ListFile(path)
+	if err != nil {
+		return err
+	}
+	if len(ranges) == 0 {
+		return errors.New("IPv6 列表为空或无有效条目")
+	}
 	return nil
 }
 
@@ -668,29 +757,13 @@ func isProxyReady() bool {
 	return true
 }
 
-// loadChinaIPList 加载中国IPv4列表（优先读内置文件，再读 /data 持久化文件）
-func loadChinaIPList() error {
-	// 查找顺序：/data/更新文件 > /usr/local/bin/内置文件 > ./当前目录
-	searchPaths := []string{
-		"/data/chn_ip.txt",
-		"/usr/local/bin/chn_ip.txt",
-		"chn_ip.txt",
-	}
-
-	var ipListFile string
-	for _, p := range searchPaths {
-		if info, err := os.Stat(p); err == nil && info.Size() > 0 {
-			ipListFile = p
-			break
-		}
-	}
-	if ipListFile == "" {
-		return fmt.Errorf("中国IPv4列表文件不存在（已内置版本不可用）")
-	}
-
-	file, err := os.Open(ipListFile)
+// parseChinaIPListFile 解析中国 IPv4 列表。只读文件、不碰全局状态，
+// 因此既能用于启动加载（loadChinaIPList），也能用于校验刚下载的 .tmp 文件。
+// 内容可疑时返回的错误可用 errors.Is(err, errIPListSuspect) 判定。
+func parseChinaIPListFile(path string) ([]ipRange, error) {
+	file, err := os.Open(path)
 	if err != nil {
-		return fmt.Errorf("打开IP列表文件失败: %w", err)
+		return nil, fmt.Errorf("打开IP列表文件失败: %w", err)
 	}
 	defer file.Close()
 
@@ -741,11 +814,11 @@ func loadChinaIPList() error {
 	}
 
 	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("读取IP列表文件失败: %w", err)
+		return nil, fmt.Errorf("读取IP列表文件失败: %w", err)
 	}
 
 	if len(ranges) == 0 {
-		return errors.New("IP列表为空")
+		return nil, errors.New("IP列表为空")
 	}
 
 	// 按起始IP排序
@@ -765,8 +838,26 @@ func loadChinaIPList() error {
 		}
 	}
 	if bad > 0 {
-		os.Remove(ipListFile) // 删除损坏的列表，下次启动重新下载
-		return fmt.Errorf("IP列表校验失败: 已知国外IP被误判为中国IP (%d/%d)，已丢弃该列表并回退为全局代理", bad, len(foreignSamples))
+		return nil, fmt.Errorf("%w: 已知国外IP被误判为中国IP (%d/%d)", errIPListSuspect, bad, len(foreignSamples))
+	}
+
+	return ranges, nil
+}
+
+// loadChinaIPList 加载中国IPv4列表（优先读内置文件，再读 /data 持久化文件）
+func loadChinaIPList() error {
+	ipListFile := findFirstIPListFile(chinaIPListSearchPaths)
+	if ipListFile == "" {
+		return fmt.Errorf("中国IPv4列表文件不存在（已内置版本不可用）")
+	}
+
+	ranges, err := parseChinaIPListFile(ipListFile)
+	if err != nil {
+		if errors.Is(err, errIPListSuspect) {
+			os.Remove(ipListFile) // 删除损坏的列表，下次启动重新下载
+			return fmt.Errorf("%v，已丢弃该列表并回退为全局代理", err)
+		}
+		return err
 	}
 
 	chinaIPRangesMu.Lock()
@@ -841,32 +932,12 @@ func findIPv4Range(ranges []ipRange, ip uint32) bool {
 	return false
 }
 
-// loadChinaIPV6List 加载中国IPv6列表（优先读内置文件，再读 /data 持久化文件）
-func loadChinaIPV6List() error {
-	// 查找顺序：/data/更新文件 > /usr/local/bin/内置文件 > ./当前目录
-	searchPaths := []string{
-		"/data/chn_ip_v6.txt",
-		"/usr/local/bin/chn_ip_v6.txt",
-		"chn_ip_v6.txt",
-	}
-
-	var ipListFile string
-	for _, p := range searchPaths {
-		if info, err := os.Stat(p); err == nil && info.Size() > 0 {
-			ipListFile = p
-			break
-		}
-	}
-	if ipListFile == "" {
-		log.Printf("[加载] IPv6 列表文件不存在，将跳过 IPv6 支持")
-		return nil // IPv6 列表不存在不算致命错误
-	}
-
-	file, err := os.Open(ipListFile)
+// parseChinaIPV6ListFile 解析中国 IPv6 列表。只读文件、不碰全局状态。
+// 无有效条目时返回 (nil, nil)，是否算失败由调用方决定。
+func parseChinaIPV6ListFile(path string) ([]ipRangeV6, error) {
+	file, err := os.Open(path)
 	if err != nil {
-		// 文件打开失败，不算致命错误
-		log.Printf("[警告] 打开 IPv6 IP列表文件失败: %v，将跳过 IPv6 支持", err)
-		return nil
+		return nil, fmt.Errorf("打开IPv6 IP列表文件失败: %w", err)
 	}
 	defer file.Close()
 
@@ -927,18 +998,39 @@ func loadChinaIPV6List() error {
 	}
 
 	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("读取IPv6 IP列表文件失败: %w", err)
+		return nil, fmt.Errorf("读取IPv6 IP列表文件失败: %w", err)
 	}
 
 	if len(ranges) == 0 {
-		// IPv6列表为空不算错误，可能文件不存在或为空
-		return nil
+		return nil, nil
 	}
 
 	// 按起始IP排序
 	sort.Slice(ranges, func(i, j int) bool {
 		return compareIPv6(ranges[i].start, ranges[j].start) < 0
 	})
+
+	return ranges, nil
+}
+
+// loadChinaIPV6List 加载中国IPv6列表（优先读内置文件，再读 /data 持久化文件）
+func loadChinaIPV6List() error {
+	ipListFile := findFirstIPListFile(chinaIPV6ListSearchPaths)
+	if ipListFile == "" {
+		log.Printf("[加载] IPv6 列表文件不存在，将跳过 IPv6 支持")
+		return nil // IPv6 列表不存在不算致命错误
+	}
+
+	ranges, err := parseChinaIPV6ListFile(ipListFile)
+	if err != nil {
+		// 文件打开/读取失败，不算致命错误
+		log.Printf("[警告] %v，将跳过 IPv6 支持", err)
+		return nil
+	}
+	if len(ranges) == 0 {
+		// IPv6列表为空不算错误，可能文件不存在或为空
+		return nil
+	}
 
 	chinaIPV6RangesMu.Lock()
 	chinaIPV6Ranges = ranges
@@ -1569,17 +1661,19 @@ func handleConfig(w http.ResponseWriter, r *http.Request) {
 
 	if r.Method == "GET" {
 		config := map[string]interface{}{
-			"listen_addr":  listenAddr,
-			"server_addr":  serverAddr,
-			"server_ip":    serverIP,
-			"token":        token,
-			"dns_server":   dnsServer,
-			"ech_domain":   echDomain,
-			"routing_mode": routingMode,
-			"web_addr":     webAddr,
-			"rules_file":   rulesFile,
-			"proxy_ip":     proxyIP,
-			"web_password": webPassword,
+			"listen_addr":      listenAddr,
+			"server_addr":      serverAddr,
+			"server_ip":        serverIP,
+			"token":            token,
+			"dns_server":       dnsServer,
+			"ech_domain":       echDomain,
+			"routing_mode":     routingMode,
+			"web_addr":         webAddr,
+			"rules_file":       rulesFile,
+			"proxy_ip":         proxyIP,
+			"web_password":     webPassword,
+			"down_limit_mbps":  downLimitMbps,
+			"idle_timeout_min": idleTimeout.Minutes(),
 		}
 		json.NewEncoder(w).Encode(config)
 		return
@@ -1627,6 +1721,27 @@ func handleConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	if v, ok := update["web_addr"]; ok && v != "" {
 		webAddr = v
+	}
+	// 长连接（视频）稳定性：面板改动立即生效，无需重启
+	if v, ok := update["down_limit_mbps"]; ok && strings.TrimSpace(v) != "" {
+		f, err := strconv.ParseFloat(strings.TrimSpace(v), 64)
+		if err != nil || f < 0 {
+			http.Error(w, `{"error":"down_limit_mbps 必须是不小于 0 的数字"}`, 400)
+			return
+		}
+		downLimitMbps = f
+		downLimitSet = true
+		log.Printf("[配置] 单连接下行限速已更新: %.1f Mbps", downLimitMbps)
+	}
+	if v, ok := update["idle_timeout_min"]; ok && strings.TrimSpace(v) != "" {
+		f, err := strconv.ParseFloat(strings.TrimSpace(v), 64)
+		if err != nil || f < 0 {
+			http.Error(w, `{"error":"idle_timeout_min 必须是不小于 0 的数字"}`, 400)
+			return
+		}
+		idleTimeout = time.Duration(f * float64(time.Minute))
+		idleTimeoutSet = true
+		log.Printf("[配置] 隧道空闲超时已更新: %s", idleTimeout)
 	}
 
 	// 刷新 ECH
@@ -1794,14 +1909,16 @@ func handleService(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleWebSocket WebSocket 实时推送
 // ======================== 出口IP检测 ========================
 
 var (
-	cachedExitIP   string
-	cachedCOLO     string
-	exitInfoMu     sync.RWMutex
-	exitInfoOnce   sync.Once
+	cachedExitIP string
+	cachedCOLO   string
+	exitInfoMu   sync.RWMutex
+
+	// 出口IP探测失败告警的节流时间戳（UnixNano）。
+	// 探测每 60 秒一次，代理不可用时若不节流会把面板的 200 条日志环形缓冲冲掉。
+	exitProbeWarnAt atomic.Int64
 )
 
 func startExitInfoDetector() {
@@ -1815,12 +1932,45 @@ func startExitInfoDetector() {
 	}()
 }
 
-func detectExitInfo() {
-	log.Printf("[检测] === 开始检测出口IP ===")
+// localProxyURL 由监听地址推导出本地 HTTP 代理地址，供出口IP检测使用。
+// 不要再用 listenAddr[strings.Index(listenAddr, ":"):]：地址里没有冒号时
+// Index 返回 -1，会直接切片越界 panic；而本函数运行在 goroutine 里，
+// 一个 panic 就会带走整个进程。
+func localProxyURL() string {
+	_, port, err := net.SplitHostPort(listenAddr)
+	if err != nil {
+		// 兼容没写成 host:port 的形式（如 "9090" 或 ":9090"）
+		if p := strings.TrimPrefix(listenAddr, ":"); p != "" {
+			if _, convErr := strconv.Atoi(p); convErr == nil {
+				port = p
+			}
+		}
+		if port == "" {
+			port = "30000" // 与 -l 的默认值保持一致
+		}
+	}
+	return "http://127.0.0.1:" + port
+}
 
+// warnExitProbeFailed 对探测失败日志做节流，避免每 60 秒刷屏
+func warnExitProbeFailed(err error) {
+	const warnInterval = 10 * time.Minute
+	now := time.Now().UnixNano()
+	for {
+		last := exitProbeWarnAt.Load()
+		if last != 0 && now-last < int64(warnInterval) {
+			return
+		}
+		if exitProbeWarnAt.CompareAndSwap(last, now) {
+			log.Printf("[检测] 获取出口IP失败: %v（%s 内不再重复提示）", err, warnInterval)
+			return
+		}
+	}
+}
+
+func detectExitInfo() {
 	// 通过本地 HTTP 代理检测出口 IP（避免 Worker 不支持 80 端口的问题）
-	localProxy := "http://127.0.0.1" + listenAddr[strings.Index(listenAddr, ":"):]
-	proxyURL, _ := url.Parse(localProxy)
+	proxyURL, _ := url.Parse(localProxyURL())
 
 	client := &http.Client{
 		Timeout: 15 * time.Second,
@@ -1833,7 +1983,7 @@ func detectExitInfo() {
 	exitIP := ""
 	resp, err := client.Get("https://api.ipify.org?format=json")
 	if err != nil {
-		log.Printf("[检测] 获取出口IP失败: %v", err)
+		warnExitProbeFailed(err)
 	} else {
 		defer resp.Body.Close()
 		body, _ := io.ReadAll(resp.Body)
@@ -1861,11 +2011,14 @@ func detectExitInfo() {
 	}
 
 	exitInfoMu.Lock()
+	changed := cachedExitIP != exitIP || cachedCOLO != colo
 	cachedExitIP = exitIP
 	cachedCOLO = colo
 	exitInfoMu.Unlock()
 
-	if exitIP != "" {
+	// 只在结果发生变化时打日志：原先每 60 秒固定打 2 行，几分钟就能把
+	// 面板的 200 条环形缓冲全部挤掉，导致真正有用的日志看不到。
+	if exitIP != "" && changed {
 		log.Printf("[检测] 出口IP: %s, COLO: %s", exitIP, colo)
 	}
 }
@@ -2272,10 +2425,17 @@ func getEffectiveServerAddr() string {
 	if err != nil {
 		return serverAddr
 	}
-	// 确保 proxyIP 包含端口
+	// 确保 proxyIP 包含端口。
+	// 不能用 strings.Contains(proxyIP, ":") 判断：裸 IPv6（如 2001:db8::1）本身就含冒号，
+	// 会被误判为"已带端口"，于是拼出没有端口的 ip 参数。改用 net.SplitHostPort，
+	// 并注意裸 IPv6 需要补方括号才能和端口拼成合法的 host:port。
 	proxyHost := proxyIP
-	if !strings.Contains(proxyIP, ":") {
-		proxyHost = proxyIP + ":443"
+	if _, _, err := net.SplitHostPort(proxyIP); err != nil {
+		if strings.Contains(proxyIP, ":") {
+			proxyHost = "[" + proxyIP + "]:443"
+		} else {
+			proxyHost = proxyIP + ":443"
+		}
 	}
 	// 构建新 path
 	if path == "" || path == "/" {
@@ -2690,8 +2850,16 @@ func handleUDPRelay(udpConn *net.UDPConn, clientAddr string, stopChan chan struc
 
 		// 检查是否是 DNS 查询（端口 53）
 		if dstPort == 53 {
+			// 关键：buf 在循环外只分配一次，下一个 UDP 包会立刻覆写它。
+			// udpData 与 data[:headerLen] 都指向 buf，必须各自拷贝出独立副本再交给
+			// goroutine，否则 DNS 查询体和 SOCKS5 响应头会被后续数据包污染（数据竞态）。
+			dnsQuery := make([]byte, len(udpData))
+			copy(dnsQuery, udpData)
+			socks5Header := make([]byte, headerLen)
+			copy(socks5Header, data[:headerLen])
+
 			log.Printf("[UDP-DNS] %s -> %s (DoH 查询)", clientAddr, target)
-			go handleDNSQuery(udpConn, addr, udpData, data[:headerLen])
+			go handleDNSQuery(udpConn, addr, dnsQuery, socks5Header)
 		} else {
 			log.Printf("[UDP] %s -> %s (暂不支持非 DNS UDP)", clientAddr, target)
 			// 这里可以扩展支持其他 UDP 流量

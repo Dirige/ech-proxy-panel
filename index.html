@@ -499,6 +499,16 @@ select.theme-select:focus{outline:none;border-color:var(--cyan)}
       <div class="config-item"><label>ECH 域名</label><input id="cfg-ech"></div>
       <div class="config-item"><label>管理面板地址</label><input id="cfg-web"></div>
       <div class="config-item"><label>面板密码</label><input id="cfg-password" type="password" placeholder="留空 = 无需登录"></div>
+      <div class="config-item">
+        <label>单连接下行限速 (Mbps)</label>
+        <input id="cfg-downlimit" type="number" min="0" step="1" placeholder="0 = 不限速">
+        <div class="hint">卡顿时可设为码率的 1.2~1.5 倍，0 = 不限速</div>
+      </div>
+      <div class="config-item">
+        <label>隧道空闲超时 (分钟)</label>
+        <input id="cfg-idletimeout" type="number" min="0" step="1" placeholder="0 = 永不主动关闭">
+        <div class="hint">双向均无数据流动超过该时长才断开，默认 15</div>
+      </div>
     </div>
   </div>
 </div>
@@ -610,8 +620,8 @@ function addDomain(type){const input=document.getElementById(type+'-input');cons
 function removeDomain(type,idx){const list=type==='direct'?directDomains:proxyDomains;list.splice(idx,1);renderDomains(type)}
 async function saveRules(){const rules=[];directDomains.forEach(d=>rules.push({type:'domain',value:d,action:'direct'}));proxyDomains.forEach(d=>rules.push({type:'domain',value:d,action:'proxy'}));await api('/api/rules',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(rules)});toast('规则已保存')}
 
-async function loadConfig(){const c=await api('/api/config');document.getElementById('cfg-listen').value=c.listen_addr;document.getElementById('cfg-server').value=c.server_addr;document.getElementById('cfg-serverip').value=c.server_ip;document.getElementById('cfg-token').value=c.token;document.getElementById('cfg-dns').value=c.dns_server;document.getElementById('cfg-ech').value=c.ech_domain;document.getElementById('cfg-routing').value=c.routing_mode;document.getElementById('cfg-proxyip').value=c.proxy_ip||'';document.getElementById('cfg-web').value=c.web_addr;document.getElementById('cfg-password').value=c.web_password||''}
-async function saveConfig(){await api('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({listen_addr:document.getElementById('cfg-listen').value,server_addr:document.getElementById('cfg-server').value,server_ip:document.getElementById('cfg-serverip').value,token:document.getElementById('cfg-token').value,dns_server:document.getElementById('cfg-dns').value,ech_domain:document.getElementById('cfg-ech').value,proxy_ip:document.getElementById('cfg-proxyip').value,routing_mode:document.getElementById('cfg-routing').value,web_addr:document.getElementById('cfg-web').value,web_password:document.getElementById('cfg-password').value})});toast('配置已保存并刷新 ECH（监听地址类需重启生效）');loadConfig()}
+async function loadConfig(){const c=await api('/api/config');document.getElementById('cfg-listen').value=c.listen_addr;document.getElementById('cfg-server').value=c.server_addr;document.getElementById('cfg-serverip').value=c.server_ip;document.getElementById('cfg-token').value=c.token;document.getElementById('cfg-dns').value=c.dns_server;document.getElementById('cfg-ech').value=c.ech_domain;document.getElementById('cfg-routing').value=c.routing_mode;document.getElementById('cfg-proxyip').value=c.proxy_ip||'';document.getElementById('cfg-web').value=c.web_addr;document.getElementById('cfg-password').value=c.web_password||'';document.getElementById('cfg-downlimit').value=c.down_limit_mbps??0;document.getElementById('cfg-idletimeout').value=Math.round(c.idle_timeout_min??15)}
+async function saveConfig(){await api('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({listen_addr:document.getElementById('cfg-listen').value,server_addr:document.getElementById('cfg-server').value,server_ip:document.getElementById('cfg-serverip').value,token:document.getElementById('cfg-token').value,dns_server:document.getElementById('cfg-dns').value,ech_domain:document.getElementById('cfg-ech').value,proxy_ip:document.getElementById('cfg-proxyip').value,routing_mode:document.getElementById('cfg-routing').value,web_addr:document.getElementById('cfg-web').value,web_password:document.getElementById('cfg-password').value,down_limit_mbps:document.getElementById('cfg-downlimit').value,idle_timeout_min:document.getElementById('cfg-idletimeout').value})});toast('配置已保存并刷新 ECH（限速/超时立即生效，监听地址类需重启）');loadConfig()}
 async function refreshECH(){const r=await api('/api/service/refresh-ech',{method:'POST'});toast(r.message||r.error);loadOverview()}
 
 let ws;

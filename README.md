@@ -149,6 +149,10 @@ Cloudflare 的资源配额是**按 invocation 计**的，所以同一条连接�
 | 换出口 / 换节点 | `-proxyip` 或改 `ECH_SERVER`，换一份全新的 invocation 资源 |
 | 空闲超时兜底 | `-idle-timeout` 默认 15 分钟，卡死的长连接会被自动回收 |
 
+> 下行限速与空闲超时可**直接在 Web 面板 → 配置页修改**，保存后立即生效、无需重启。
+> 优先级为 **命令行参数 > 环境变量 > config.json > 默认值**；
+> 显式写 `0`（不限速 / 永不主动关闭）会被正确保存，不会被默认值覆盖。
+>
 > 注：如果服务端 Worker 是你自己部署的，还可以直接改服务端：
 > `_worker.js` 里发送前检查 `webSocket.getBufferedAmount()` 做背压，
 > 并把 Worker 的 `limits.cpu_ms` 调到 300000（默认只有 30s）。
