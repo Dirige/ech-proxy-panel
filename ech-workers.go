@@ -60,11 +60,17 @@ var (
 	downLimitMbps float64       // 单连接下行限速（Mbps），0 = 不限速
 	idleTimeout   time.Duration // 隧道空闲超时（无任何数据交互多久后主动关闭），0 = 不主动关闭
 
-	// 标记上面两项是否已被「命令行参数 / 环境变量」显式指定。
-	// 用于解决"显式设置的 0 被当成没设置"的问题：只有当标记为 false 时才允许 config.json 覆盖。
-	// 由 main() 中的 flag.Visit 与 applyEnvDefaults 维护。
-	downLimitSet   bool
-	idleTimeoutSet bool
+	// ========== 参数来源标记 ==========
+	// 优先级：命令行 > 环境变量 > config.json > 内置默认。
+	//
+	// 判定"某项到底有没有被设置"，必须看**是否被显式给出**，不能看"值是否等于内置默认值"。
+	// 旧实现用的是后者，于是取值恰好等于内置默认值的环境变量（ECH_SERVER 恰好是默认节点、
+	// ECH_WEB 恰好是 :9090、ECH_ROUTING 恰好是 bypass_cn）会被误判成"没设置"，
+	// 转而被 config.json 覆盖 —— 同一份 compose 里有的字段 env 生效、有的字段 config.json 生效，
+	// 完全不可预测，用户看到的就是"配置文件好像没生效"。
+	cliSet     = map[string]bool{}   // 命令行**显式**给出的 flag 名
+	envSet     = map[string]string{} // config.json 键名 -> 提供该值的环境变量名（存在即为已设置）
+	fromConfig = map[string]bool{}   // 最终采用了 config.json 取值的键名
 
 	// Web 会话管理
 	webSessions   map[string]time.Time // sessionID -> 过期时间
@@ -106,6 +112,67 @@ var (
 	dnsCache   map[string]dnsCacheEntry
 	dnsCacheMu sync.RWMutex
 )
+
+// flagToConfigKey 建立 flag 名 -> config.json 键名 的映射，
+// 把"命令行有没有显式给出"和"config.json 里有没有这个键"对应起来。
+var flagToConfigKey = map[string]string{
+	"l":            "listen_addr",
+	"f":            "server_addr",
+	"ip":           "server_ip",
+	"token":        "token",
+	"dns":          "dns_server",
+	"ech":          "ech_domain",
+	"routing":      "routing_mode",
+	"web":          "web_addr",
+	"proxyip":      "proxy_ip",
+	"password":     "web_password",
+	"downlimit":    "down_limit_mbps",
+	"idle-timeout": "idle_timeout_min",
+}
+
+// fieldSource 返回某配置项最终取值的来源，用于启动日志与面板提示。
+func fieldSource(flagName, key string) string {
+	switch {
+	case flagName != "" && cliSet[flagName]:
+		return "命令行"
+	case envSet[key] != "":
+		return "环境变量"
+	case fromConfig[key]:
+		return "config.json"
+	default:
+		return "内置默认"
+	}
+}
+
+// maskSecret 只保留首尾各 2 个字符，避免把令牌 / 密码明文写进日志。
+func maskSecret(s string) string {
+	if s == "" {
+		return "(空)"
+	}
+	r := []rune(s)
+	if len(r) <= 4 {
+		return "****"
+	}
+	return string(r[:2]) + "****" + string(r[len(r)-2:])
+}
+
+// orNone 空串显示为 (未设置)，让启动日志更好读。
+func orNone(s string) string {
+	if s == "" {
+		return "(未设置)"
+	}
+	return s
+}
+
+// warnEnvOverridesConfig 环境变量与 config.json 同时给出同一字段且取值不同时，
+// 明确提示哪一侧被忽略 —— 这类"静默覆盖"正是用户排查配置不生效时最想看到的信息。
+func warnEnvOverridesConfig(key, envName, envVal, cfgVal string) {
+	if envName == "" || cfgVal == "" || envVal == cfgVal {
+		return
+	}
+	log.Printf("[配置] 注意：%s 在环境变量 %s 和 config.json 中都出现且取值不同，已采用环境变量（%s），config.json 的 %s 被忽略",
+		key, envName, envVal, cfgVal)
+}
 
 type dnsCacheEntry struct {
 	ips       []net.IP
@@ -266,130 +333,197 @@ func init() {
 //        ECH_ROUTING, ECH_WEB, ECH_PROXY_IP, ECH_PASSWORD, ECH_CONFIG, ECH_RULES_DATA,
 //        ECH_DOWN_LIMIT, ECH_IDLE_TIMEOUT
 func applyEnvDefaults() {
-	if v := os.Getenv("ECH_LISTEN"); v != "" && listenAddr == "0.0.0.0:30000" {
+	if v := os.Getenv("ECH_LISTEN"); v != "" && !cliSet["l"] {
 		listenAddr = v
+		envSet["listen_addr"] = "ECH_LISTEN"
 	}
-	if v := os.Getenv("ECH_SERVER"); v != "" && serverAddr == "hhech.nb1tap.kdns.fr:443" {
+	if v := os.Getenv("ECH_SERVER"); v != "" && !cliSet["f"] {
 		serverAddr = v
+		envSet["server_addr"] = "ECH_SERVER"
 	}
-	if v := os.Getenv("ECH_SERVER_IP"); v != "" && serverIP == "" {
+	if v := os.Getenv("ECH_SERVER_IP"); v != "" && !cliSet["ip"] {
 		serverIP = v
+		envSet["server_ip"] = "ECH_SERVER_IP"
 	}
-	if v := os.Getenv("ECH_TOKEN"); v != "" && token == "honghongfree" {
+	if v := os.Getenv("ECH_TOKEN"); v != "" && !cliSet["token"] {
 		token = v
+		envSet["token"] = "ECH_TOKEN"
 	}
-	if v := os.Getenv("ECH_DNS"); v != "" && dnsServer == "dns.alidns.com/dns-query" {
+	if v := os.Getenv("ECH_DNS"); v != "" && !cliSet["dns"] {
 		dnsServer = v
+		envSet["dns_server"] = "ECH_DNS"
 	}
-	if v := os.Getenv("ECH_DOMAIN"); v != "" && echDomain == "cloudflare-ech.com" {
+	if v := os.Getenv("ECH_DOMAIN"); v != "" && !cliSet["ech"] {
 		echDomain = v
+		envSet["ech_domain"] = "ECH_DOMAIN"
 	}
-	if v := os.Getenv("ECH_ROUTING"); v != "" && routingMode == "bypass_cn" {
+	if v := os.Getenv("ECH_ROUTING"); v != "" && !cliSet["routing"] {
 		routingMode = v
+		envSet["routing_mode"] = "ECH_ROUTING"
 	}
-	if v := os.Getenv("ECH_WEB"); v != "" && webAddr == "" {
+	if v := os.Getenv("ECH_WEB"); v != "" && !cliSet["web"] {
 		webAddr = v
+		envSet["web_addr"] = "ECH_WEB"
 	}
-	if v := os.Getenv("ECH_PROXY_IP"); v != "" && proxyIP == "" {
+	if v := os.Getenv("ECH_PROXY_IP"); v != "" && !cliSet["proxyip"] {
 		proxyIP = v
+		envSet["proxy_ip"] = "ECH_PROXY_IP"
 	}
-	if v := os.Getenv("ECH_PASSWORD"); v != "" && webPassword == "" {
+	if v := os.Getenv("ECH_PASSWORD"); v != "" && !cliSet["password"] {
 		webPassword = v
+		envSet["web_password"] = "ECH_PASSWORD"
 	}
-	if v := os.Getenv("ECH_CONFIG"); v != "" && configFile == "/data/config.json" {
+	if v := os.Getenv("ECH_CONFIG"); v != "" && !cliSet["config"] {
 		configFile = v
 	}
-	if v := os.Getenv("ECH_RULES_DATA"); v != "" && rulesData == "/data/rules.json" {
+	if v := os.Getenv("ECH_RULES_DATA"); v != "" && !cliSet["rules-data"] {
 		rulesData = v
 	}
-	// 这里判断的是 downLimitSet / idleTimeoutSet（命令行是否显式给出），而不是
-	// "值是否等于默认值"——否则 -downlimit 0 / -idle-timeout 0 会被当成没设置，被环境变量顶掉。
-	if v := os.Getenv("ECH_DOWN_LIMIT"); v != "" && !downLimitSet {
+	// 数值 / 时长同样看 flag 是否被显式给出，这样 `-downlimit 0`、`-idle-timeout 0`
+	// 这类"有意义的 0"不会被环境变量顶掉。
+	if v := os.Getenv("ECH_DOWN_LIMIT"); v != "" && !cliSet["downlimit"] {
 		if f, err := strconv.ParseFloat(v, 64); err == nil {
 			downLimitMbps = f
-			downLimitSet = true
+			envSet["down_limit_mbps"] = "ECH_DOWN_LIMIT"
 		}
 	}
-	if v := os.Getenv("ECH_IDLE_TIMEOUT"); v != "" && !idleTimeoutSet {
+	if v := os.Getenv("ECH_IDLE_TIMEOUT"); v != "" && !cliSet["idle-timeout"] {
 		if d, err := time.ParseDuration(v); err == nil {
 			idleTimeout = d
-			idleTimeoutSet = true
+			envSet["idle_timeout_min"] = "ECH_IDLE_TIMEOUT"
 		}
+	}
+}
+
+// applyConfigFile 把 config.json 的值填进全局参数。
+//
+// 只有「命令行和环境变量都没显式给出」（take 返回 true）的字段才会被 config.json 覆盖，
+// 因此优先级为：命令行 > 环境变量 > config.json > 内置默认。
+// 与旧实现的关键差别：判定依据是"有没有被显式给出"，而不是"值是否等于内置默认值"。
+func applyConfigFile(cfg *appConfig) {
+	if cfg == nil {
+		return
+	}
+	take := func(flagName, key string) bool {
+		return !cliSet[flagName] && envSet[key] == ""
+	}
+	if take("l", "listen_addr") && cfg.ListenAddr != "" {
+		listenAddr = cfg.ListenAddr
+		fromConfig["listen_addr"] = true
+	}
+	if take("f", "server_addr") && cfg.ServerAddr != "" {
+		serverAddr = cfg.ServerAddr
+		fromConfig["server_addr"] = true
+	}
+	if take("ip", "server_ip") && cfg.ServerIP != "" {
+		serverIP = cfg.ServerIP
+		fromConfig["server_ip"] = true
+	}
+	if take("token", "token") && cfg.Token != "" {
+		token = cfg.Token
+		fromConfig["token"] = true
+	}
+	if take("dns", "dns_server") && cfg.DNSServer != "" {
+		dnsServer = cfg.DNSServer
+		fromConfig["dns_server"] = true
+	}
+	if take("ech", "ech_domain") && cfg.ECHDomain != "" {
+		echDomain = cfg.ECHDomain
+		fromConfig["ech_domain"] = true
+	}
+	if take("routing", "routing_mode") && cfg.RoutingMode != "" {
+		routingMode = cfg.RoutingMode
+		fromConfig["routing_mode"] = true
+	}
+	if take("web", "web_addr") && cfg.WebAddr != "" {
+		webAddr = cfg.WebAddr
+		fromConfig["web_addr"] = true
+	}
+	if take("proxyip", "proxy_ip") && cfg.ProxyIP != "" {
+		proxyIP = cfg.ProxyIP
+		fromConfig["proxy_ip"] = true
+	}
+	if take("password", "web_password") && cfg.WebPassword != "" {
+		webPassword = cfg.WebPassword
+		fromConfig["web_password"] = true
+	}
+	// 指针字段：用 nil 区分「config.json 里没有这个键」和「显式写了 0」
+	if take("downlimit", "down_limit_mbps") && cfg.DownLimitMbps != nil {
+		downLimitMbps = *cfg.DownLimitMbps
+		fromConfig["down_limit_mbps"] = true
+	}
+	if take("idle-timeout", "idle_timeout_min") && cfg.IdleTimeoutMin != nil {
+		idleTimeout = time.Duration(*cfg.IdleTimeoutMin * float64(time.Minute))
+		fromConfig["idle_timeout_min"] = true
+	}
+
+	// 环境变量压过 config.json 且取值不同时明确告警 —— 这类"静默覆盖"正是
+	// "配置文件明明改了却没生效"最难排查的原因。
+	warnEnvOverridesConfig("listen_addr", envSet["listen_addr"], listenAddr, cfg.ListenAddr)
+	warnEnvOverridesConfig("server_addr", envSet["server_addr"], serverAddr, cfg.ServerAddr)
+	warnEnvOverridesConfig("server_ip", envSet["server_ip"], serverIP, cfg.ServerIP)
+	warnEnvOverridesConfig("dns_server", envSet["dns_server"], dnsServer, cfg.DNSServer)
+	warnEnvOverridesConfig("ech_domain", envSet["ech_domain"], echDomain, cfg.ECHDomain)
+	warnEnvOverridesConfig("routing_mode", envSet["routing_mode"], routingMode, cfg.RoutingMode)
+	warnEnvOverridesConfig("web_addr", envSet["web_addr"], webAddr, cfg.WebAddr)
+	warnEnvOverridesConfig("proxy_ip", envSet["proxy_ip"], proxyIP, cfg.ProxyIP)
+	// 令牌 / 密码不写明文
+	if n := envSet["token"]; n != "" && cfg.Token != "" && cfg.Token != token {
+		log.Printf("[配置] 注意：token 在环境变量 %s 和 config.json 中都出现且取值不同，已采用环境变量（%s），config.json 的被忽略", n, maskSecret(token))
+	}
+	if n := envSet["web_password"]; n != "" && cfg.WebPassword != "" && cfg.WebPassword != webPassword {
+		log.Printf("[配置] 注意：web_password 在环境变量 %s 和 config.json 中都出现且取值不同，已采用环境变量（%s），config.json 的被忽略", n, maskSecret(webPassword))
+	}
+	if n := envSet["down_limit_mbps"]; n != "" && cfg.DownLimitMbps != nil && *cfg.DownLimitMbps != downLimitMbps {
+		log.Printf("[配置] 注意：down_limit_mbps 在环境变量 %s 和 config.json 中都出现且取值不同，已采用环境变量（%.1f Mbps），config.json 的 %.1f Mbps 被忽略", n, downLimitMbps, *cfg.DownLimitMbps)
+	}
+	if n := envSet["idle_timeout_min"]; n != "" && cfg.IdleTimeoutMin != nil && *cfg.IdleTimeoutMin != idleTimeout.Minutes() {
+		log.Printf("[配置] 注意：idle_timeout_min 在环境变量 %s 和 config.json 中都出现且取值不同，已采用环境变量（%.1f 分钟），config.json 的 %.1f 分钟被忽略", n, idleTimeout.Minutes(), *cfg.IdleTimeoutMin)
 	}
 }
 
 func main() {
 	flag.Parse()
 
-	// 先用 flag.Visit 记录哪些参数是命令行**显式**给出的。
-	// 不能用"值是否等于默认值"来判断，否则 -downlimit 0 / -idle-timeout 0 会被误判成"未设置"，
-	// 用户特意设置的 0 就会被环境变量或 config.json 覆盖掉。
+	// 记录哪些参数是命令行**显式**给出的（flag.Visit 只回调被显式设置的 flag）。
+	// 环境变量与 config.json 的取舍全部以它为准，不再比较"值是否等于内置默认值"。
 	flag.Visit(func(f *flag.Flag) {
-		switch f.Name {
-		case "downlimit":
-			downLimitSet = true
-		case "idle-timeout":
-			idleTimeoutSet = true
-		}
+		cliSet[f.Name] = true
 	})
 
-	// 环境变量（命令行参数优先，环境变量其次，config.json 最后）
+	// 优先级：命令行 > 环境变量 > config.json > 内置默认
 	applyEnvDefaults()
 
-	// 加载配置文件（命令行参数 > 环境变量 > config.json）
-	if cfg, err := loadConfig(configFile); err == nil {
+	// 加载配置文件：只有「命令行和环境变量都没显式给出」的字段，才采用 config.json 的值。
+	cfg, cfgErr := loadConfig(configFile)
+	if cfgErr == nil {
 		log.Printf("[启动] 已加载配置文件: %s", configFile)
-		if listenAddr == "0.0.0.0:30000" && cfg.ListenAddr != "" {
-			listenAddr = cfg.ListenAddr
-		}
-		if serverAddr == "hhech.nb1tap.kdns.fr:443" && cfg.ServerAddr != "" {
-			serverAddr = cfg.ServerAddr
-		}
-		if serverIP == "" && cfg.ServerIP != "" {
-			serverIP = cfg.ServerIP
-		}
-		if token == "honghongfree" && cfg.Token != "" {
-			token = cfg.Token
-		}
-		if dnsServer == "dns.alidns.com/dns-query" && cfg.DNSServer != "" {
-			dnsServer = cfg.DNSServer
-		}
-		if echDomain == "cloudflare-ech.com" && cfg.ECHDomain != "" {
-			echDomain = cfg.ECHDomain
-		}
-		if routingMode == "bypass_cn" && cfg.RoutingMode != "" {
-			routingMode = cfg.RoutingMode
-		}
-		if webAddr == "" && cfg.WebAddr != "" {
-			webAddr = cfg.WebAddr
-		}
-		if proxyIP == "" && cfg.ProxyIP != "" {
-			proxyIP = cfg.ProxyIP
-		}
-		if webPassword == "" && cfg.WebPassword != "" {
-			webPassword = cfg.WebPassword
-		}
-		// 只有命令行/环境变量都没显式给出时才采用 config.json 的值。
-		// 用指针判断「键是否存在」，这样配置里写 0（不限速/不主动关闭）也能正确生效。
-		if !downLimitSet && cfg.DownLimitMbps != nil {
-			downLimitMbps = *cfg.DownLimitMbps
-			downLimitSet = true
-		}
-		if !idleTimeoutSet && cfg.IdleTimeoutMin != nil {
-			idleTimeout = time.Duration(*cfg.IdleTimeoutMin * float64(time.Minute))
-			idleTimeoutSet = true
-		}
+		applyConfigFile(cfg)
 	} else if configFile != "" {
-		log.Printf("[启动] 配置文件不存在或无效，使用命令行参数")
+		// 把底层错误也打出来：挂载权限不对 / 目录只读时，用户能立刻看到真正原因
+		log.Printf("[启动] 配置文件 %s 读取失败，本次仅使用命令行参数与环境变量: %v", configFile, cfgErr)
 	}
 
-	// 如果没有配置文件且命令行有参数，自动保存配置
+	// 打印每个字段的最终取值与来源：配置"改了却不生效"时可一眼看出是谁覆盖了谁
+	log.Printf("[配置] 生效值（优先级：命令行 > 环境变量 > config.json > 内置默认）")
+	log.Printf("[配置]   服务端   %s  [%s]", serverAddr, fieldSource("f", "server_addr"))
+	log.Printf("[配置]   令牌     %s  [%s]", maskSecret(token), fieldSource("token", "token"))
+	log.Printf("[配置]   分流模式 %s  [%s]", routingMode, fieldSource("routing", "routing_mode"))
+	log.Printf("[配置]   监听地址 %s  [%s]", listenAddr, fieldSource("l", "listen_addr"))
+	log.Printf("[配置]   面板地址 %s  [%s]", orNone(webAddr), fieldSource("web", "web_addr"))
+	log.Printf("[配置]   面板密码 %s  [%s]", maskSecret(webPassword), fieldSource("password", "web_password"))
+	log.Printf("[配置]   出口 IP  %s  [%s]", orNone(proxyIP), fieldSource("proxyip", "proxy_ip"))
+	log.Printf("[配置]   下行限速 %.1f Mbps  [%s]", downLimitMbps, fieldSource("downlimit", "down_limit_mbps"))
+	log.Printf("[配置]   空闲超时 %s  [%s]", idleTimeout, fieldSource("idle-timeout", "idle_timeout_min"))
+	log.Printf("[配置]   配置文件 %s | 规则文件 %s", configFile, rulesData)
+
+	// 如果没有配置文件且命令行/环境变量有参数，自动保存一份初始配置
 	if _, err := os.Stat(configFile); os.IsNotExist(err) {
 		if serverAddr != "" {
 			if err := saveConfig(configFile); err != nil {
-				log.Printf("[启动] 保存配置文件失败: %v", err)
+				log.Printf("[警告] 保存初始配置文件 %s 失败: %v", configFile, err)
 			} else {
-				log.Printf("[启动] 已保存配置到: %s", configFile)
+				log.Printf("[启动] 已保存初始配置到: %s", configFile)
 			}
 		}
 	}
@@ -411,18 +545,11 @@ func main() {
 	// 设置日志同时写入缓冲区
 	log.SetOutput(&logWriter{original: os.Stderr})
 
-	// 加载自定义规则
-	if routingMode == "custom" {
-		if rulesFile == "" {
-			log.Fatal("[启动] custom 分流模式需要指定规则文件 -rules")
-		}
-		if err := loadCustomRules(rulesFile); err != nil {
-			log.Fatalf("[启动] 加载自定义规则失败: %v", err)
-		}
-		customRulesMu.RLock()
-		log.Printf("[启动] 已加载 %d 条自定义规则", len(customRules))
-		customRulesMu.RUnlock()
-	}
+	// 自定义规则统一在「加载面板规则持久化文件」之后处理（见下方），
+	// 这样 -rules 指定的文件可以明确地覆盖面板规则文件。
+	// 注意：这里**不再**因为 custom 模式缺少 -rules 就 log.Fatal ——
+	// 那个逻辑会在 restart: always 下把容器打进 crash-loop（面板里把分流改成 custom
+	// 之后一重启就再也起不来）。规则缺失只降级为告警，用面板规则文件继续跑。
 
 	// 加载中国IP列表（始终加载，供分流和后台更新使用）
 	{
@@ -460,8 +587,28 @@ func main() {
 	// 启动出口IP检测
 	log.Printf("[启动] 启动出口IP检测器...")
 
-	// 加载面板规则持久化文件
+	// 加载面板规则持久化文件（/data/rules.json，面板"规则"页保存的就是它）
 	loadRulesDataFile()
+
+	// custom 分流模式：显式给了 -rules 就以该文件为准（覆盖面板规则文件）；
+	// 没给就用面板规则文件，只告警不退出，避免 crash-loop。
+	if routingMode == "custom" {
+		if rulesFile == "" {
+			customRulesMu.RLock()
+			n := len(customRules)
+			customRulesMu.RUnlock()
+			log.Printf("[规则] custom 分流模式：未指定 -rules，使用面板规则文件 %s（当前 %d 条）", rulesData, n)
+			if n == 0 {
+				log.Printf("[警告] custom 分流模式当前没有任何规则，所有流量都会走代理；请在面板「规则」页添加规则")
+			}
+		} else if err := loadCustomRules(rulesFile); err != nil {
+			log.Printf("[警告] custom 分流模式：加载 -rules 文件 %s 失败: %v，已回退为面板规则文件", rulesFile, err)
+		} else {
+			customRulesMu.RLock()
+			log.Printf("[启动] 已加载 %d 条自定义规则（-rules: %s）", len(customRules), rulesFile)
+			customRulesMu.RUnlock()
+		}
+	}
 
 	startExitInfoDetector()
 
@@ -1188,11 +1335,12 @@ func isNormalCloseError(err error) bool {
 
 // ======================== 自定义规则 ========================
 
-// loadCustomRules 从文件加载自定义规则
-func loadCustomRules(filePath string) error {
+// parseCustomRulesFile 只读解析规则文件，不碰全局状态。
+// 格式：每行 `type,value,action`（逗号分隔），# 或 // 开头为注释。
+func parseCustomRulesFile(filePath string) ([]customRule, error) {
 	file, err := os.Open(filePath)
 	if err != nil {
-		return fmt.Errorf("打开规则文件失败: %w", err)
+		return nil, fmt.Errorf("打开规则文件失败: %w", err)
 	}
 	defer file.Close()
 
@@ -1228,13 +1376,20 @@ func loadCustomRules(filePath string) error {
 	}
 
 	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("读取规则文件失败: %w", err)
+		return nil, fmt.Errorf("读取规则文件失败: %w", err)
 	}
+	return rules, nil
+}
 
+// loadCustomRules 从文件加载自定义规则并替换内存中的规则
+func loadCustomRules(filePath string) error {
+	rules, err := parseCustomRulesFile(filePath)
+	if err != nil {
+		return err
+	}
 	customRulesMu.Lock()
 	customRules = rules
 	customRulesMu.Unlock()
-
 	return nil
 }
 
@@ -1252,34 +1407,68 @@ func saveCustomRules(filePath string) error {
 		}
 	}
 
-	file, err := os.Create(filePath)
+	// 先写临时文件再原子替换：写一半被中断时不会留下半截规则文件
+	tmpPath := filePath + ".tmp"
+	file, err := os.Create(tmpPath)
 	if err != nil {
 		return fmt.Errorf("创建规则文件失败: %w", err)
 	}
-	defer file.Close()
-
 	for _, rule := range rules {
 		fmt.Fprintf(file, "%s,%s,%s\n", rule.Type, rule.Value, rule.Action)
 	}
-
+	if err := file.Sync(); err != nil {
+		file.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("写入规则文件失败: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("关闭规则文件失败: %w", err)
+	}
+	if err := os.Rename(tmpPath, filePath); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("替换规则文件失败: %w", err)
+	}
 	return nil
 }
 
-// loadRulesDataFile 从面板规则持久化文件加载规则
+// loadRulesDataFile 从面板规则持久化文件加载规则。
+//
+// 三种情况要区分开，避免"文件坏了就把原本能用的规则一起清空"：
+//   - 文件不存在            -> 保持现状（可能来自 -rules 或内置默认）
+//   - 文件存在但内容为空白  -> 用户在面板里清空了规则，真正清空
+//   - 文件有内容但解析不出  -> 视为损坏，保留当前规则并告警
 func loadRulesDataFile() {
 	if rulesData == "" {
 		return
 	}
-	if _, err := os.Stat(rulesData); os.IsNotExist(err) {
+	raw, err := os.ReadFile(rulesData)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			log.Printf("[警告] 读取面板规则文件 %s 失败: %v", rulesData, err)
+		}
 		return
 	}
-	if err := loadCustomRules(rulesData); err != nil {
-		log.Printf("[规则] 加载面板规则失败: %v", err)
-	} else {
-		customRulesMu.RLock()
-		log.Printf("[规则] 已从面板规则文件加载 %d 条规则", len(customRules))
-		customRulesMu.RUnlock()
+	if strings.TrimSpace(string(raw)) == "" {
+		customRulesMu.Lock()
+		customRules = nil
+		customRulesMu.Unlock()
+		log.Printf("[规则] 面板规则文件 %s 为空，规则已清空", rulesData)
+		return
 	}
+	rules, err := parseCustomRulesFile(rulesData)
+	if err != nil {
+		log.Printf("[警告] 解析面板规则文件 %s 失败: %v，保留当前规则", rulesData, err)
+		return
+	}
+	if len(rules) == 0 {
+		log.Printf("[警告] 面板规则文件 %s 有内容但没有任何合法规则，保留当前规则", rulesData)
+		return
+	}
+	customRulesMu.Lock()
+	customRules = rules
+	customRulesMu.Unlock()
+	log.Printf("[规则] 已从面板规则文件加载 %d 条规则", len(rules))
 }
 
 // ======================== 连接追踪与流量统计 ========================
@@ -1655,6 +1844,15 @@ func handleStatus(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// writeJSONError 以 JSON 形式返回错误。
+// 面板统一用 fetch(...).json() 解析响应，http.Error 输出的是纯文本会让前端解析失败，
+// 所以这里所有错误路径都走 JSON。
+func writeJSONError(w http.ResponseWriter, code int, msg string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	json.NewEncoder(w).Encode(map[string]string{"error": msg})
+}
+
 // handleConfig 获取/更新配置
 func handleConfig(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
@@ -1675,6 +1873,15 @@ func handleConfig(w http.ResponseWriter, r *http.Request) {
 			"down_limit_mbps":  downLimitMbps,
 			"idle_timeout_min": idleTimeout.Minutes(),
 		}
+		// 每个字段的取值来源（命令行 / 环境变量 / config.json / 内置默认）。
+		// 面板据此提示"该项被环境变量锁定，改了 config.json 也不会生效"。
+		sources := make(map[string]string, len(flagToConfigKey))
+		for flagName, key := range flagToConfigKey {
+			sources[key] = fieldSource(flagName, key)
+		}
+		config["_source"] = sources
+		config["_config_file"] = configFile
+		config["_rules_file"] = rulesData
 		json.NewEncoder(w).Encode(config)
 		return
 	}
@@ -1682,7 +1889,7 @@ func handleConfig(w http.ResponseWriter, r *http.Request) {
 	// POST: 更新配置
 	var update map[string]string
 	if err := json.NewDecoder(r.Body).Decode(&update); err != nil {
-		http.Error(w, `{"error":"invalid json"}`, 400)
+		writeJSONError(w, http.StatusBadRequest, "请求体不是合法的 JSON")
 		return
 	}
 
@@ -1726,35 +1933,37 @@ func handleConfig(w http.ResponseWriter, r *http.Request) {
 	if v, ok := update["down_limit_mbps"]; ok && strings.TrimSpace(v) != "" {
 		f, err := strconv.ParseFloat(strings.TrimSpace(v), 64)
 		if err != nil || f < 0 {
-			http.Error(w, `{"error":"down_limit_mbps 必须是不小于 0 的数字"}`, 400)
+			writeJSONError(w, http.StatusBadRequest, "单连接下行限速必须是不小于 0 的数字")
 			return
 		}
 		downLimitMbps = f
-		downLimitSet = true
 		log.Printf("[配置] 单连接下行限速已更新: %.1f Mbps", downLimitMbps)
 	}
 	if v, ok := update["idle_timeout_min"]; ok && strings.TrimSpace(v) != "" {
 		f, err := strconv.ParseFloat(strings.TrimSpace(v), 64)
 		if err != nil || f < 0 {
-			http.Error(w, `{"error":"idle_timeout_min 必须是不小于 0 的数字"}`, 400)
+			writeJSONError(w, http.StatusBadRequest, "隧道空闲超时必须是不小于 0 的数字")
 			return
 		}
 		idleTimeout = time.Duration(f * float64(time.Minute))
-		idleTimeoutSet = true
 		log.Printf("[配置] 隧道空闲超时已更新: %s", idleTimeout)
 	}
 
-	// 刷新 ECH
-	if err := refreshECH(); err != nil {
-		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
-		return
-	}
-
-	// 保存配置到文件
+	// 先落盘再刷新 ECH。顺序很重要：旧实现是 refreshECH 失败就 return，
+	// 整次保存被跳过 —— 用户改了配置却什么都没存下来，还只看到一个"刷新失败"。
 	if err := saveConfig(configFile); err != nil {
 		log.Printf("[配置] 保存配置文件失败: %v", err)
-	} else {
-		log.Printf("[配置] 配置已保存到: %s", configFile)
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": fmt.Sprintf("保存配置文件 %s 失败: %v", configFile, err)})
+		return
+	}
+	log.Printf("[配置] 配置已保存到: %s", configFile)
+
+	// 刷新 ECH（失败也不再让本次保存作废，只回传警告）
+	if err := refreshECH(); err != nil {
+		log.Printf("[配置] 配置已保存，但刷新 ECH 失败: %v", err)
+		json.NewEncoder(w).Encode(map[string]string{"status": "saved", "warning": "配置已保存，但刷新 ECH 失败: " + err.Error()})
+		return
 	}
 
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
@@ -1776,7 +1985,7 @@ func handleRules(w http.ResponseWriter, r *http.Request) {
 	// POST: 替换规则
 	var rules []customRule
 	if err := json.NewDecoder(r.Body).Decode(&rules); err != nil {
-		http.Error(w, `{"error":"invalid json"}`, 400)
+		writeJSONError(w, http.StatusBadRequest, "请求体不是合法的 JSON 规则数组")
 		return
 	}
 
@@ -1784,12 +1993,15 @@ func handleRules(w http.ResponseWriter, r *http.Request) {
 	customRules = rules
 	customRulesMu.Unlock()
 
-	// 持久化到文件
+	// 持久化到文件。写盘失败必须如实回传 —— 旧实现只打日志仍返回 ok，
+	// 面板提示"规则已保存"，重启后规则却没了（挂载只读 / 属主不对时最容易踩）。
 	if err := saveCustomRules(rulesData); err != nil {
 		log.Printf("[规则] 保存规则失败: %v", err)
-	} else {
-		log.Printf("[规则] 已保存 %d 条规则到 %s", len(rules), rulesData)
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": fmt.Sprintf("规则已生效但写入 %s 失败（重启后会丢失）: %v", rulesData, err)})
+		return
 	}
+	log.Printf("[规则] 已保存 %d 条规则到 %s", len(rules), rulesData)
 
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }

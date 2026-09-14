@@ -89,7 +89,26 @@ docker run -d --name ech-proxy --restart always \
 | `ECH_DOWN_LIMIT` | `-downlimit` | `0`                     | 单连接下行限速 Mbps（`0`=不限） |
 | `ECH_IDLE_TIMEOUT` | `-idle-timeout` | `15m`              | 隧道空闲超时（`0`=永不主动关闭） |
 
-优先级：**命令行参数 > 环境变量 > config.json**。
+优先级：**命令行参数 > 环境变量 > config.json > 内置默认**。
+
+判定依据是「该项**有没有被显式给出**」，不是「取值等不等于内置默认值」。这一点很关键：
+
+- 如果你的 compose 里写了某个 env（哪怕取值恰好就是默认值），那一项就**由 env 说了算**，
+  `config.json` 里同名的键会被忽略 —— 想改用配置文件里的值，先把 compose 里对应的 env 删掉。
+- 启动时会打印一份「生效值 + 每项来源」清单，并在 env 与 config.json 取值冲突时单独告警，
+  例如：
+
+  ```
+  [配置] 注意：server_addr 在环境变量 ECH_SERVER 和 config.json 中都出现且取值不同，
+         已采用环境变量（hhech.nb1tap.kdns.fr:443），config.json 的 old-node.example.com:443 被忽略
+  [配置] 生效值（优先级：命令行 > 环境变量 > config.json > 内置默认）
+  [配置]   服务端   hhech.nb1tap.kdns.fr:443  [环境变量]
+  [配置]   分流模式 bypass_cn  [环境变量]
+  [配置]   监听地址 127.0.0.1:19098  [config.json]
+  ```
+
+  面板「配置」页顶部也会同样标出哪些项被环境变量锁定。
+- `-downlimit 0` / `-idle-timeout 0` 这类**显式写 0** 的设置会被正确保留，不会被默认值顶掉。
 
 ---
 
@@ -128,6 +147,24 @@ docker run -d --name ech-proxy --restart always \
 docker exec -it ech-proxy vi /data/config.json
 docker restart ech-proxy
 ```
+
+> 改了 `config.json` 却不见效？先看启动日志里的 `[配置] 生效值 ... [来源]` 清单。
+> 若某项来源显示「环境变量」，说明 compose 里对应的 env 压过了配置文件 ——
+> 删掉那行 env 再重启即可。挂载目录不可读 / 不可写时，日志也会直接打出底层错误
+> （例如 `permission denied`），不会静默吞掉。
+
+### 配置 / 规则保存失败会明确报错
+
+面板保存配置或规则时，如果写盘失败（常见于 `/data` 挂载为只读、或目录属主不对），
+接口会返回 500 并提示具体原因，面板弹出「保存失败：…」，**不会**再假装成功。
+规则文件采用「先写 `.tmp` 再原子替换」，写一半被中断不会留下半截文件。
+
+### `routing_mode=custom` 不再导致容器反复重启
+
+以前在面板把分流改成「自定义规则」后，`config.json` 会记住 `custom`，
+而启动时若没有 `-rules` 参数就会直接退出 —— 配合 `restart: always` 变成无限重启，
+表现为面板彻底打不开。现在改为：**任何规则来源缺失或损坏都只降级为告警**，
+并使用面板规则文件 `/data/rules.json` 继续运行。
 
 ---
 
