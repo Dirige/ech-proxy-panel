@@ -7,6 +7,7 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o ech-workers ech-workers
 
 FROM alpine:3.19
 RUN apk add --no-cache ca-certificates tzdata
+ENV TZ=Asia/Shanghai
 COPY --from=builder /build/ech-workers /usr/local/bin/ech-workers
 # 内置中国 IP 列表（CIDR 格式，构建时已校验）
 COPY chn_ip.txt /usr/local/bin/chn_ip.txt
