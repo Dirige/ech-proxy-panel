@@ -7,6 +7,7 @@ COPY src/ech-workers.go src/index.html ./
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o ech-workers ech-workers.go
 
 FROM alpine:3.19
+ENV TZ=Asia/Shanghai
 RUN apk add --no-cache ca-certificates tzdata
 COPY --from=builder /build/ech-workers /usr/local/bin/ech-workers
 COPY src/chn_ip.txt /usr/local/bin/chn_ip.txt
