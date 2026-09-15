@@ -7,6 +7,7 @@
   <img src="https://img.shields.io/badge/routing-bypass_cn-blue" alt="routing" />
   <img src="https://img.shields.io/badge/listen-0.0.0.0%3A30000-lightgrey" alt="listen" />
   <img src="https://img.shields.io/badge/panel-%3A9090-orange" alt="panel" />
+  <a href="https://github.com/Dirige/ech-proxy-panel/pkgs/container/ech-proxy-panel"><img src="https://img.shields.io/badge/ghcr.io-ech--proxy--panel-blue?logo=docker" alt="docker" /></a>
 </p>
 
 ---
@@ -113,8 +114,11 @@ ech-wk-main/
 ├── config.example.json    # 配置模板
 ├── docker-compose.yml     # 一键启动
 ├── rules.example.txt      # custom 分流规则模板
+├── Dockerfile             # 镜像构建（CI 自动推 ghcr.io）
+├── .github/workflows/     # CI：push main 自动构建
 ├── scripts/
 │   └── Test-Config.ps1    # 一键校验
+├── src/                   # Go 源码（供 Docker 构建）
 ├── docs/                  # 详细文档
 ├── AGENTS.md              # 给 AI 看的仓库约定
 ├── LICENSE                # MIT
@@ -139,6 +143,25 @@ ech-wk-main/
 
 - 原项目：[byJoey/ech-wk](https://github.com/byJoey/ech-wk)
 - 致谢：中国 IP 列表 [mayaxcn/china-ip-list](https://github.com/mayaxcn/china-ip-list)
+
+## Docker 构建
+
+本仓库含 `Dockerfile`，推送到 `main` 后 GitHub Actions 自动构建并推送镜像到 `ghcr.io`。
+
+```bash
+# 拉取最新镜像
+docker pull ghcr.io/dirige/ech-proxy-panel:latest
+```
+
+<details>
+<summary>本地构建（不用 CI）</summary>
+
+```bash
+docker build -t ech-proxy-local .
+docker run -d --name ech-proxy --restart always -p 9090:9090 -p 30000:30000 -v ./config.json:/data/config.json ech-proxy-local
+```
+
+</details>
 
 ## 许可证
 

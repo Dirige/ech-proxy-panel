@@ -13,12 +13,15 @@ ECH Workers 代理客户端的运行配置包：`config.json` 描述本地监听
 ## 3. 项目结构与架构说明
 ```
 ech-wk-main/
-├── config.json            # 唯一现役配置（9 字段，见 README 配置表，可正常提交）
+├── config.json            # 现役配置（9 字段，见 README 配置表，可正常提交）
 ├── config.example.json    # 模板（可安全提交）
 ├── docker-compose.yml     # 一键启动示例（无密钥，可提交）
 ├── rules.example.txt      # custom 分流规则模板（用时复制为 rules.txt）
+├── Dockerfile             # 镜像构建（基于 src/ 编译 ech-workers，CI 自动推 ghcr.io）
+├── .github/workflows/     # CI：push main 自动构建+推送 Docker 镜像
 ├── scripts/
 │   └── Test-Config.ps1    # 配置校验脚本（BOM+UTF-8，WinPS 5.1 可直接跑）
+├── src/                   # Go 源码（ech-workers.go / index.html / chn_ip.txt 等，供 Docker 构建）
 ├── LICENSE                # MIT
 ├── README.md              # 人类使用说明
 ├── AGENTS.md              # 本文件
