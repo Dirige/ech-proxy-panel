@@ -1,23 +1,34 @@
-# ech-wk-main
+<h1 align="center">ech-wk-main</h1>
 
-一句话：ECH Workers 代理客户端的**运行配置包**——改好 `config.json`，交给外部二进制/Docker 去跑。
+<p align="center">ECH Workers 代理客户端 · 开箱即用的 <code>bypass_cn</code> 运行配置包</p>
 
-定位：本包是原 ECH Proxy Panel 项目的**便捷分流策略补充方案**（一套可直接套用的 `bypass_cn` 配置），原项目为主、本包为辅；二进制/面板/源码均在原项目。
+<p align="center">
+  <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="license" /></a>
+  <img src="https://img.shields.io/badge/routing-bypass_cn-blue" alt="routing" />
+  <img src="https://img.shields.io/badge/listen-0.0.0.0%3A30000-lightgrey" alt="listen" />
+  <img src="https://img.shields.io/badge/panel-%3A9090-orange" alt="panel" />
+</p>
 
-> 上游说明：`../ech-proxy-panel-trae-agent-XS7r7t/README.md`（参数全集+面板）、`../ECHWorkers-windows-amd64/README.txt`（桌面端）。本目录只管配置，不管二进制。
+---
+
+> **定位**：本包是原 ECH Proxy Panel 项目的**便捷分流策略补充方案**（一套可直接套用的 `bypass_cn` 配置），原项目为主、本包为辅；二进制 / 面板 / 源码均在原项目。
+>
+> 上游说明（本地只读参考，不在本仓）：`../ech-proxy-panel-trae-agent-XS7r7t/README.md`（参数全集 + 面板）、`../ECHWorkers-windows-amd64/README.txt`（桌面端）。
 
 ## 功能特性
 
-- 开箱即用的 9 字段 `config.json`（监听 / 落地 / 分流 / 面板全覆盖）
-- `bypass_cn` 分流：国内直连、国外代理，软路由友好
-- 优选 IP/域名 + 固定出口 IP 支持
-- Web 面板（`:9090`）可视化改配置、看流量
-- `config.example.json` 模板保留（包内 token 本就公开，分享无压力）
-- `docker-compose.yml` 一键启动 + `rules.example.txt` 自定义分流模板 + `Test-Config.ps1` 一键校验
+| 能力 | 说明 |
+|------|------|
+| 开箱即用 | 9 字段 `config.json`，监听 / 落地 / 分流 / 面板全覆盖 |
+| `bypass_cn` 分流 | 国内直连、国外代理，软路由友好 |
+| 优选 + 固定出口 | `server_ip` 优选 IP/域名，`proxy_ip` 固定出口 IP |
+| Web 面板 | `:9090` 可视化改配置、看流量 |
+| 一键校验 | `scripts/Test-Config.ps1`，改完配置先验再跑 |
+| 一键启动 | `docker-compose.yml` + 自定义规则模板 `rules.example.txt` |
 
 ## 快速开始
 
-前置：已拿到服务端地址+令牌；已准备 `ech-workers` 二进制或 Docker。
+前置：已拿到服务端地址 + 令牌；已准备 `ech-workers` 二进制或 Docker。
 
 ```powershell
 # 1. 进目录（运行目录：任意，先进到本目录所在位置）
@@ -29,48 +40,106 @@ Copy-Item -LiteralPath "config.example.json" -Destination "config.json"
 # 3. 一键校验
 .\scripts\Test-Config.ps1
 
-# 4a. Docker 跑（运行目录：ech-wk-main）
+# 4. 启动（运行目录：ech-wk-main）
 docker compose up -d
-# 备选：单条 docker run（运行目录：任意）
-# docker run -d --name ech-proxy --restart always -p 9090:9090 -p 30000:30000 -v ${PWD}/config.json:/data/config.json ghcr.io/dirige/ech-proxy-panel:latest
-
-# 4b. 桌面端跑：把 config.json 放到 ECHWorkersGUI.exe 同目录，双击 GUI 填入即可（详见 docs/getting-started.md）
 ```
 
-跑起来后：浏览器开 `http://你的IP:9090` 进面板；本地代理 `127.0.0.1:30000`（SOCKS5/HTTP）。
+<details>
+<summary>备选：单条 <code>docker run</code>（不用 compose）</summary>
 
-## 配置
+```bash
+docker run -d --name ech-proxy --restart always \
+  -p 9090:9090 -p 30000:30000 \
+  -v ${PWD}/config.json:/data/config.json \
+  ghcr.io/dirige/ech-proxy-panel:latest
+```
 
-完整 9 字段说明见 `docs/getting-started.md`。速查：
+</details>
 
-| 字段 | 作用 | 示例（占位） |
-|------|------|--------------|
+<details>
+<summary>备选：桌面端 GUI（Windows）</summary>
+
+把 `config.json` 放到 `ECHWorkersGUI.exe` 同目录，双击启动，浏览器 / 系统代理指向 `127.0.0.1:30000` 验证。
+
+</details>
+
+跑起来后：
+
+- 面板 → 浏览器打开 `http://你的IP:9090`
+- 代理 → `127.0.0.1:30000`（SOCKS5 / HTTP）
+
+## 配置速查
+
+完整说明见 [`docs/getting-started.md`](./docs/getting-started.md)。
+
+| 字段 | 作用 | 示例 |
+|------|------|------|
 | `listen_addr` | 本地监听 | `0.0.0.0:30000` |
-| `server_addr` | 服务端地址 | `你的服务地址:443` |
-| `server_ip` | 优选 IP/域名，可空 | `172.64.229.240` |
+| `server_addr` | 服务端地址（必填，带 `:443`） | `你的服务地址:443` |
+| `server_ip` | 优选 IP / 域名，可空 | `172.64.229.240` |
 | `token` | 认证令牌 | `your-token` |
-| `dns_server` | DoH | `dns.alidns.com/dns-query` |
+| `dns_server` | DoH 服务器 | `dns.alidns.com/dns-query` |
 | `ech_domain` | ECH 域名 | `cloudflare-ech.com` |
-| `routing_mode` | 分流：`global`/`bypass_cn`/`none`/`custom` | `bypass_cn` |
+| `routing_mode` | 分流模式（见下表） | `bypass_cn` |
 | `web_addr` | 面板监听 | `:9090` |
 | `proxy_ip` | 固定出口，可空 | `101.79.165.113:443` |
 
-> 本目录现役 `config.json` 用的是 `bypass_cn`；面板模板默认 `global`。要全局代理就改 `global`。
+### 分流模式
 
-## 使用文档
+| 模式 | 说明 |
+|------|------|
+| `global` | 全局代理（上游面板默认） |
+| `bypass_cn` | 跳过中国大陆（**本包默认**：国内直连、国外代理） |
+| `none` | 不代理，直连 |
+| `custom` | 自定义规则（需 `-rules` 文件，见 `rules.example.txt`） |
 
-- `docs/index.md` — 文档入口
-- `docs/getting-started.md` — 9 字段详解+三种启动方式
-- `docs/faq-troubleshooting.md` — 排错
-- `AGENTS.md` — 给 AI 看的仓库约定
+### 数据流
+
+```mermaid
+flowchart LR
+    A[本地应用] --> B[listen_addr :30000<br/>SOCKS5 / HTTP]
+    B --> C[ECH 加密]
+    C --> D[server_addr<br/>经 server_ip 优选解析]
+    D --> E[proxy_ip 固定出口<br/>可选]
+    E --> F[目标站]
+    G[routing_mode] -. 决定直连 / 代理 .-> B
+```
+
+## 目录结构
+
+```text
+ech-wk-main/
+├── config.json            # 现役配置（可正常提交，token 系公开信息）
+├── config.example.json    # 配置模板
+├── docker-compose.yml     # 一键启动
+├── rules.example.txt      # custom 分流规则模板
+├── scripts/
+│   └── Test-Config.ps1    # 一键校验
+├── docs/                  # 详细文档
+├── AGENTS.md              # 给 AI 看的仓库约定
+├── LICENSE                # MIT
+└── README.md              # 本文件
+```
+
+## 文档导航
+
+| 文档 | 内容 |
+|------|------|
+| [`docs/index.md`](./docs/index.md) | 文档入口 |
+| [`docs/getting-started.md`](./docs/getting-started.md) | 9 字段详解 + 三种启动方式 |
+| [`docs/faq-troubleshooting.md`](./docs/faq-troubleshooting.md) | 连不上 / 端口占用 / 分流不生效排错 |
+| [`AGENTS.md`](./AGENTS.md) | AI 协作约定（行为守则、提交规范） |
 
 ## 说明与安全提示
 
-- 本包 `token`/`server_addr` 系公开群组的公开信息，**无需保密**：`config.json` 可正常提交、截图分享；`config.example.json` 仅作模板保留。
-- `web_addr` 默认 `:9090` 监听全接口且面板无登录鉴权：公网机必须收敛到 `127.0.0.1:9090` 或加反代鉴权 + 防火墙收紧；仅内网软路由场景才保留全接口监听。
+- 本包 `token` / `server_addr` 系公开群组的公开信息，**无需保密**：`config.json` 可正常提交、截图分享。
+- `web_addr` 默认 `:9090` 监听全接口且面板无登录鉴权：**公网机必须收敛到 `127.0.0.1:9090` 或加反代鉴权 + 防火墙收紧**；仅内网软路由场景保留全接口。
 
 ## 相关项目
 
 - 原项目：[byJoey/ech-wk](https://github.com/byJoey/ech-wk)
-- 面板二次开发版：`../ech-proxy-panel-trae-agent-XS7r7t/`（本地只读参考）
-- 许可证：本目录见 `LICENSE`（MIT）；上游代码以其仓库 LICENSE 为准。
+- 致谢：中国 IP 列表 [mayaxcn/china-ip-list](https://github.com/mayaxcn/china-ip-list)
+
+## 许可证
+
+本目录见 [`LICENSE`](./LICENSE)（MIT）；上游代码以其仓库 LICENSE 为准。
