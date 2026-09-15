@@ -4,7 +4,6 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ECH Proxy Control</title>
-<link rel="icon" href="data:,">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Syne:wght@600;700;800&family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
@@ -73,9 +72,9 @@ body::after{
   background:linear-gradient(135deg,var(--cyan),#0891b2);
   display:flex;align-items:center;justify-content:center;
   box-shadow:0 0 24px var(--cyan-glow),inset 0 1px 0 rgba(255,255,255,0.2);
-  position:relative;color:#04121a;
+  position:relative;
 }
-.brand-logo svg{width:20px;height:20px;stroke:currentColor;fill:none}
+.brand-logo svg{width:20px;height:20px;fill:#04121a}
 .brand-text{display:flex;flex-direction:column}
 .brand-title{font-family:'Syne',sans-serif;font-weight:800;font-size:16px;letter-spacing:-0.02em}
 .brand-sub{font-size:10px;color:var(--text-dim);letter-spacing:0.08em;text-transform:uppercase;margin-top:2px}
@@ -184,8 +183,6 @@ body::after{
 .btn-sm{padding:6px 11px;font-size:12px}
 .btn-ghost{background:transparent;border-color:transparent;color:var(--text-sec)}
 .btn-ghost:hover{color:var(--red);background:rgba(251,113,133,0.08)}
-select.theme-select{padding:6px 8px;background:rgba(7,11,20,0.6);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text);font-size:12px;font-family:inherit}
-select.theme-select:focus{outline:none;border-color:var(--cyan)}
 
 /* ===== Search / Input ===== */
 .search-box{position:relative;flex:1;max-width:420px}
@@ -289,9 +286,8 @@ select.theme-select:focus{outline:none;border-color:var(--cyan)}
 @media(max-width:768px){
   .sidebar{width:60px}
   .sidebar-brand{justify-content:center;padding:18px 0}
-  .brand-text,.nav-item span,.sidebar-footer .status-wrap,.nav-section{display:none}
+  .brand-text,.nav-item span,.sidebar-footer span,.nav-section{display:none}
   .nav-item{justify-content:center;padding:12px 0}
-  .sidebar-footer{justify-content:center;padding:12px 6px}
   .main{margin-left:60px;padding:16px}
   .cards{grid-template-columns:1fr 1fr}
   .rules-grid{grid-template-columns:1fr}
@@ -329,10 +325,10 @@ select.theme-select:focus{outline:none;border-color:var(--cyan)}
       <span>配置</span>
     </div>
   </div>
-  <div class="sidebar-footer" style="justify-content:space-between">
-    <span class="status-wrap" style="display:flex;align-items:center;gap:8px"><span class="status-dot"></span><span>运行中</span></span>
-    <span class="mono" id="app-version" style="opacity:.55" title="面板版本">v1.0</span>
-    <button class="btn btn-sm btn-ghost" onclick="doLogout()" title="退出登录">退出</button>
+  <div class="sidebar-footer">
+    <span class="status-dot"></span>
+    <span>运行中</span>
+    <span class="mono" id="app-version" style="opacity:.55" title="面板版本">v1.1</span>
   </div>
 </div>
 
@@ -407,7 +403,7 @@ select.theme-select:focus{outline:none;border-color:var(--cyan)}
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
         暂停
       </button>
-      <select id="conn-interval" class="theme-select" onchange="changeConnInterval()">
+      <select id="conn-interval" onchange="changeConnInterval()" style="padding:6px 8px;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#e1e4e8;font-size:12px">
         <option value="1000">1 秒</option>
         <option value="3000" selected>3 秒</option>
         <option value="5000">5 秒</option>
@@ -543,21 +539,19 @@ function switchPage(pg){
   document.querySelector(`.nav-item[data-page="${pg}"]`).classList.add('active');
   document.getElementById('page-'+pg).classList.add('active');
   localStorage.setItem('ech_page',pg);
-  stopConnRefresh();stopOverviewRefresh();
-  if(pg==='overview'){loadOverview();startOverviewRefresh()}
+  if(pg==='overview')loadOverview();
   else if(pg==='connections'){loadConnections();startConnRefresh()}
-  else{if(pg==='rules')loadRules();else if(pg==='config')loadConfig()}
+  else{stopConnRefresh();if(pg==='rules')loadRules();else if(pg==='config')loadConfig()}
 }
 document.querySelectorAll('.nav-item').forEach(el=>el.addEventListener('click',()=>switchPage(el.dataset.page)));
 
 const savedPage=localStorage.getItem('ech_page')||'overview';
 switchPage(savedPage);
 
-function fmtBytes(b){if(!b||b<=0)return '0 B';const k=1024;const u=['B','KB','MB','GB','TB'];const i=Math.floor(Math.log(b)/Math.log(k));return(b/Math.pow(k,i)).toFixed(i>0?2:0)+' '+u[i]}
-function fmtSpeed(bps){if(!bps||bps<=0)return '0 B/s';const k=1024;const u=['B/s','KB/s','MB/s','GB/s'];const i=Math.floor(Math.log(bps)/Math.log(k));return(bps/Math.pow(k,i)).toFixed(i>0?2:0)+' '+u[i]}
-async function api(path,opts){const r=await fetch(path,opts);if(r.status===401){location.href='/login';throw new Error('未登录');}return r.json()}
-async function doLogout(){try{await fetch('/api/logout',{method:'POST'})}catch(e){}location.href='/login'}
-function escHtml(s){const d=document.createElement('div');d.textContent=s==null?'':String(s);return d.innerHTML}
+function fmtBytes(b){if(b===0)return '0 B';const k=1024;const u=['B','KB','MB','GB','TB'];const i=Math.floor(Math.log(b)/Math.log(k));return(b/Math.pow(k,i)).toFixed(i>0?2:0)+' '+u[i]}
+function fmtSpeed(bps){if(bps===0)return '0 B/s';const k=1024;const u=['B/s','KB/s','MB/s','GB/s'];const i=Math.floor(Math.log(bps)/Math.log(k));return(bps/Math.pow(k,i)).toFixed(i>0?2:0)+' '+u[i]}
+async function api(path,opts){const r=await fetch(path,opts);return r.json()}
+function escHtml(s){const d=document.createElement('div');d.textContent=s;return d.innerHTML}
 
 // 实时速度由后端通过 WebSocket 推送（rt_upload/rt_download，单位 B/s），前端直接显示
 
@@ -574,22 +568,18 @@ async function checkPing(){
   document.getElementById('ov-ping').textContent=avg>0?'平均 '+avg+'ms':'无法检测';
 }
 
-let overviewTimer=null;
-function startOverviewRefresh(){stopOverviewRefresh();overviewTimer=setInterval(()=>{if(document.getElementById('page-overview').classList.contains('active'))loadOverview(true)},10000)}
-function stopOverviewRefresh(){if(overviewTimer){clearInterval(overviewTimer);overviewTimer=null}}
-async function loadOverview(quiet){
-  try{
-    const [status,logs]=await Promise.all([api('/api/status'),api('/api/logs')]);
-    document.getElementById('ov-active').textContent=status.active_conns;
-    document.getElementById('ov-total-up').textContent=fmtBytes(status.total_upload);
-    document.getElementById('ov-total-down').textContent=fmtBytes(status.total_download);
-    document.getElementById('ov-mem').textContent=(status.memory_mb||0).toFixed(1)+' MB';
-    document.getElementById('app-version').textContent='v'+(status.version||'1.0');
-    const logEl=document.getElementById('ov-logs');
-    if(!logs||logs.length===0){logEl.innerHTML='<div class="empty">暂无日志</div>'}
-    else{logEl.innerHTML=logs.map(l=>{const cls=l.level==='error'?'level-error':l.level==='warn'?'level-warn':'level-info';return`<div class="log-line"><span class="time">${escHtml(l.time)}</span> <span class="${cls}">[${escHtml(l.level)}]</span> ${escHtml(l.msg)}</div>`}).join('');logEl.scrollTop=logEl.scrollHeight}
-    if(!quiet){detectIP();detectExitInfo();checkPing()}
-  }catch(e){if(e&&e.message==='未登录')return}
+async function loadOverview(){
+  const [status,logs]=await Promise.all([api('/api/status'),api('/api/logs')]);
+  document.getElementById('ov-active').textContent=status.active_conns;
+  document.getElementById('ov-total-up').textContent=fmtBytes(status.total_upload);
+  document.getElementById('ov-total-down').textContent=fmtBytes(status.total_download);
+  document.getElementById('ov-mem').textContent=status.memory_mb.toFixed(1)+' MB';
+  document.getElementById('app-version').textContent='v'+(status.version||'1.1');
+  const logEl=document.getElementById('ov-logs');
+  if(!logs||logs.length===0){logEl.innerHTML='<div class="empty">暂无日志</div>';return}
+  logEl.innerHTML=logs.map(l=>{const cls=l.level==='error'?'level-error':l.level==='warn'?'level-warn':'level-info';return`<div class="log-line"><span class="time">${l.time}</span> <span class="${cls}">[${l.level}]</span> ${escHtml(l.msg)}</div>`}).join('');
+  logEl.scrollTop=logEl.scrollHeight;
+  detectIP();detectExitInfo();checkPing();
 }
 
 let connSortBy='start_time',connSortOrder='desc';
@@ -614,19 +604,11 @@ function removeDomain(type,idx){const list=type==='direct'?directDomains:proxyDo
 async function saveRules(){const rules=[];directDomains.forEach(d=>rules.push({type:'domain',value:d,action:'direct'}));proxyDomains.forEach(d=>rules.push({type:'domain',value:d,action:'proxy'}));await api('/api/rules',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(rules)});toast('规则已保存')}
 
 async function loadConfig(){const c=await api('/api/config');document.getElementById('cfg-listen').value=c.listen_addr;document.getElementById('cfg-server').value=c.server_addr;document.getElementById('cfg-serverip').value=c.server_ip;document.getElementById('cfg-token').value=c.token;document.getElementById('cfg-dns').value=c.dns_server;document.getElementById('cfg-ech').value=c.ech_domain;document.getElementById('cfg-routing').value=c.routing_mode;document.getElementById('cfg-proxyip').value=c.proxy_ip||'';document.getElementById('cfg-web').value=c.web_addr;document.getElementById('cfg-password').value=c.web_password||''}
-async function saveConfig(){await api('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({listen_addr:document.getElementById('cfg-listen').value,server_addr:document.getElementById('cfg-server').value,server_ip:document.getElementById('cfg-serverip').value,token:document.getElementById('cfg-token').value,dns_server:document.getElementById('cfg-dns').value,ech_domain:document.getElementById('cfg-ech').value,proxy_ip:document.getElementById('cfg-proxyip').value,routing_mode:document.getElementById('cfg-routing').value,web_addr:document.getElementById('cfg-web').value,web_password:document.getElementById('cfg-password').value})});toast('配置已保存并刷新 ECH（监听地址类需重启生效）');loadConfig()}
+async function saveConfig(){await api('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({listen_addr:document.getElementById('cfg-listen').value,server_addr:document.getElementById('cfg-server').value,server_ip:document.getElementById('cfg-serverip').value,token:document.getElementById('cfg-token').value,dns_server:document.getElementById('cfg-dns').value,ech_domain:document.getElementById('cfg-ech').value,proxy_ip:document.getElementById('cfg-proxyip').value,routing_mode:document.getElementById('cfg-routing').value,web_addr:document.getElementById('cfg-web').value,web_password:document.getElementById('cfg-password').value})});toast('配置已保存，重启后生效');loadConfig()}
 async function refreshECH(){const r=await api('/api/service/refresh-ech',{method:'POST'});toast(r.message||r.error);loadOverview()}
 
 let ws;
-let wsAuthFailed=false;
-function connectWS(){
-  if(wsAuthFailed)return;
-  const proto=location.protocol==='https:'?'wss:':'ws:';
-  ws=new WebSocket(`${proto}//${location.host}/ws`);
-  ws.onmessage=(e)=>{try{const d=JSON.parse(e.data);if(d.error==='未登录'){wsAuthFailed=true;location.href='/login';try{ws.close()}catch(_){}return}document.getElementById('ov-active').textContent=d.active_conns;document.getElementById('ov-total-up').textContent=fmtBytes(d.total_upload);document.getElementById('ov-total-down').textContent=fmtBytes(d.total_download);document.getElementById('ov-mem').textContent=(d.memory_mb||0).toFixed(1)+' MB';document.getElementById('ov-speed-up').textContent=fmtSpeed(d.rt_upload||0);document.getElementById('ov-speed-down').textContent=fmtSpeed(d.rt_download||0)}catch(ex){}};
-  ws.onerror=async()=>{try{const r=await fetch('/api/status');if(r.status===401){wsAuthFailed=true;location.href='/login'}}catch(_){}};
-  ws.onclose=()=>{if(!wsAuthFailed)setTimeout(connectWS,3000)}
-}
+function connectWS(){const proto=location.protocol==='https:'?'wss:':'ws:';ws=new WebSocket(`${proto}//${location.host}/ws`);ws.onmessage=(e)=>{try{const d=JSON.parse(e.data);document.getElementById('ov-active').textContent=d.active_conns;document.getElementById('ov-total-up').textContent=fmtBytes(d.total_upload);document.getElementById('ov-total-down').textContent=fmtBytes(d.total_download);document.getElementById('ov-mem').textContent=d.memory_mb.toFixed(1)+' MB';document.getElementById('ov-speed-up').textContent=fmtSpeed(d.rt_upload||0);document.getElementById('ov-speed-down').textContent=fmtSpeed(d.rt_download||0)}catch(ex){}};ws.onclose=()=>setTimeout(connectWS,3000)}
 connectWS();
 </script>
 </body>

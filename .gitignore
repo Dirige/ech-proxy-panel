@@ -1,3 +1,11 @@
-# 本包 token / server_addr 系公开群组公开信息，无需保密，config.json 可正常提交
-# 仅忽略日志
-*.log
+*.exe
+*.tar
+*.tar.gz
+*.zip
+ech-workers
+go.mod
+go.sum
+config.json
+dist/
+__pycache__/
+*.pyc

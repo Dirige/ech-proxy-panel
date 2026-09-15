@@ -1,6 +1,0 @@
-# custom 分流规则模板：复制为 rules.txt 后挂载使用
-# 格式：domain,域名,动作（direct 直连 / proxy 代理），domain 为包含匹配
-domain,baidu.com,direct
-domain,qq.com,direct
-domain,google.com,proxy
-domain,github.com,proxy

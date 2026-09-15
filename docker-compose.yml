@@ -1,15 +1,12 @@
-# ech-wk-main 一键启动（无密钥，可提交；真实配置在本地 config.json，不提交）
+version: '3.8'
+
 services:
   ech-proxy:
     image: ghcr.io/dirige/ech-proxy-panel:latest
-    container_name: ech-proxy
+    container_name: ech
     restart: always
     ports:
-      - "9090:9090"
+      - "30001:9090"
       - "30000:30000"
     volumes:
-      - ./config.json:/data/config.json
-      # custom 分流时取消下面一行的注释，并把 config.json 的 routing_mode 改为 custom：
-      # - ./rules.txt:/etc/rules.txt
-    # custom 分流时取消下面一行的注释：
-    # command: -routing custom -rules /etc/rules.txt
+      - ./data:/data
