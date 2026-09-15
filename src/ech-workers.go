@@ -1,4 +1,4 @@
-﻿package main
+package main
 
 import (
 	"bufio"
@@ -39,7 +39,7 @@ import (
 //go:embed index.html
 var indexHTML embed.FS
 
-// ======================== 鍏ㄥ眬鍙傛暟 ========================
+// ======================== 全局参数 ========================
 
 var (
 	listenAddr  string
@@ -48,45 +48,55 @@ var (
 	token       string
 	dnsServer   string
 	echDomain   string
-	routingMode string // 鍒嗘祦妯″紡: "global", "bypass_cn", "none", "custom"
-	webAddr     string // Web 绠＄悊闈㈡澘鐩戝惉鍦板潃
-	rulesFile   string // 鑷畾涔夎鍒欐枃浠惰矾寰?	rulesData   string // 闈㈡澘瑙勫垯鎸佷箙鍖栨枃浠惰矾寰?	configFile  string // 閰嶇疆鏂囦欢璺緞
-	proxyIP     string // 鍥哄畾鍑哄彛 IP锛堟牸寮? ip 鎴?ip:port锛?	webPassword string // Web 绠＄悊闈㈡澘鐧诲綍瀵嗙爜锛堜负绌哄垯涓嶉渶鐧诲綍锛?
-	// ========== 闀胯繛鎺ワ紙瑙嗛锛夌ǔ瀹氭€х浉鍏?==========
-	downLimitMbps float64       // 鍗曡繛鎺ヤ笅琛岄檺閫燂紙Mbps锛夛紝0 = 涓嶉檺閫?	idleTimeout   time.Duration // 闅ч亾绌洪棽瓒呮椂锛堟棤浠讳綍鏁版嵁浜や簰澶氫箙鍚庝富鍔ㄥ叧闂級锛? = 涓嶄富鍔ㄥ叧闂?
-	// Web 浼氳瘽绠＄悊
-	webSessions   map[string]time.Time // sessionID -> 杩囨湡鏃堕棿
+	routingMode string // 分流模式: "global", "bypass_cn", "none", "custom"
+	webAddr     string // Web 管理面板监听地址
+	rulesFile   string // 自定义规则文件路径
+	rulesData   string // 面板规则持久化文件路径
+	configFile  string // 配置文件路径
+	proxyIP     string // 固定出口 IP（格式: ip 或 ip:port）
+	webPassword string // Web 管理面板登录密码（为空则不需登录）
+
+	// ========== 长连接（视频）稳定性相关 ==========
+	downLimitMbps float64       // 单连接下行限速（Mbps），0 = 不限速
+	idleTimeout   time.Duration // 隧道空闲超时（无任何数据交互多久后主动关闭），0 = 不主动关闭
+
+	// Web 会话管理
+	webSessions   map[string]time.Time // sessionID -> 过期时间
 	webSessionsMu sync.Mutex
 
 	echListMu sync.RWMutex
 	echList   []byte
 
-	// 涓浗IP鍒楄〃锛圛Pv4锛?	chinaIPRangesMu sync.RWMutex
+	// 中国IP列表（IPv4）
+	chinaIPRangesMu sync.RWMutex
 	chinaIPRanges   []ipRange
 
-	// 涓浗IP鍒楄〃锛圛Pv6锛?	chinaIPV6RangesMu sync.RWMutex
+	// 中国IP列表（IPv6）
+	chinaIPV6RangesMu sync.RWMutex
 	chinaIPV6Ranges   []ipRangeV6
 
-	// ========== Web 绠＄悊闈㈡澘鐩稿叧 ==========
+	// ========== Web 管理面板相关 ==========
 
-	// 杩炴帴杩借釜
+	// 连接追踪
 	activeConns   sync.Map // key: connID(string) -> *connInfo
 	connIDCounter atomic.Int64
-	activeConnCnt atomic.Int64 // 娲昏穬杩炴帴鏁帮紙閬垮厤鍏ㄩ噺閬嶅巻锛?
-	// 娴侀噺缁熻
+	activeConnCnt atomic.Int64 // 活跃连接数（避免全量遍历）
+
+	// 流量统计
 	totalUpload   atomic.Int64
 	totalDownload atomic.Int64
 	totalConns    atomic.Int64
 	startTime     time.Time
 
-	// 鏃ュ織缂撳啿 (鏈€杩?200 鏉?
+	// 日志缓冲 (最近 200 条)
 	logBuffer   []logEntry
 	logBufferMu sync.Mutex
 
-	// 鑷畾涔夎鍒?	customRules   []customRule
+	// 自定义规则
+	customRules   []customRule
 	customRulesMu sync.RWMutex
 
-	// DNS 瑙ｆ瀽缁撴灉缂撳瓨锛坆ypass_cn 妯″紡涓嬮伩鍏嶉噸澶嶆煡璇級
+	// DNS 解析结果缓存（bypass_cn 模式下避免重复查询）
 	dnsCache   map[string]dnsCacheEntry
 	dnsCacheMu sync.RWMutex
 )
@@ -96,21 +106,21 @@ type dnsCacheEntry struct {
 	expiresAt time.Time
 }
 
-// ipRange 琛ㄧず涓€涓狪Pv4 IP鑼冨洿
+// ipRange 表示一个IPv4 IP范围
 type ipRange struct {
 	start uint32
 	end   uint32
 }
 
-// ipRangeV6 琛ㄧず涓€涓狪Pv6 IP鑼冨洿
+// ipRangeV6 表示一个IPv6 IP范围
 type ipRangeV6 struct {
 	start [16]byte
 	end   [16]byte
 }
 
-// ========== Web 绠＄悊闈㈡澘绫诲瀷 ==========
+// ========== Web 管理面板类型 ==========
 
-// connInfo 杩炴帴淇℃伅
+// connInfo 连接信息
 type connInfo struct {
 	ID        string
 	Source    string
@@ -122,7 +132,8 @@ type connInfo struct {
 	download  atomic.Int64
 }
 
-// connInfoResp 鐢ㄤ簬 JSON 搴忓垪鍖栫殑杩炴帴淇℃伅锛堜笉鍚?atomic 瀛楁锛?type connInfoResp struct {
+// connInfoResp 用于 JSON 序列化的连接信息（不含 atomic 字段）
+type connInfoResp struct {
 	ID        string    `json:"id"`
 	Source    string    `json:"source"`
 	Target    string    `json:"target"`
@@ -133,19 +144,21 @@ type connInfo struct {
 	StartTime time.Time `json:"start_time"`
 }
 
-// logEntry 鏃ュ織鏉＄洰
+// logEntry 日志条目
 type logEntry struct {
 	Time  string `json:"time"`
 	Level string `json:"level"`
 	Msg   string `json:"msg"`
 }
 
-// customRule 鑷畾涔夎鍒?type customRule struct {
+// customRule 自定义规则
+type customRule struct {
 	Type   string `json:"type"`   // domain, ipcidr, keyword
-	Value  string `json:"value"`  // 瑙勫垯鍊?	Action string `json:"action"` // proxy, direct
+	Value  string `json:"value"`  // 规则值
+	Action string `json:"action"` // proxy, direct
 }
 
-// appConfig 搴旂敤閰嶇疆
+// appConfig 应用配置
 type appConfig struct {
 	ListenAddr  string `json:"listen_addr"`
 	ServerAddr  string `json:"server_addr"`
@@ -157,9 +170,13 @@ type appConfig struct {
 	WebAddr     string `json:"web_addr"`
 	ProxyIP     string `json:"proxy_ip"`
 	WebPassword string `json:"web_password"`
-	// 闀胯繛鎺ワ紙瑙嗛锛夌ǔ瀹氭€?	DownLimitMbps float64 `json:"down_limit_mbps"` // 鍗曡繛鎺ヤ笅琛岄檺閫燂紙Mbps锛夛紝0 = 涓嶉檺閫?	IdleTimeoutMin float64 `json:"idle_timeout_min"` // 闅ч亾绌洪棽瓒呮椂锛堝垎閽燂級锛? = 涓嶄富鍔ㄥ叧闂?}
+	// 长连接（视频）稳定性
+	DownLimitMbps float64 `json:"down_limit_mbps"` // 单连接下行限速（Mbps），0 = 不限速
+	IdleTimeoutMin float64 `json:"idle_timeout_min"` // 隧道空闲超时（分钟），0 = 不主动关闭
+}
 
-// loadConfig 浠庢枃浠跺姞杞介厤缃?func loadConfig(filePath string) (*appConfig, error) {
+// loadConfig 从文件加载配置
+func loadConfig(filePath string) (*appConfig, error) {
 	data, err := os.ReadFile(filePath)
 	if err != nil {
 		return nil, err
@@ -171,7 +188,8 @@ type appConfig struct {
 	return &cfg, nil
 }
 
-// saveConfig 淇濆瓨閰嶇疆鍒版枃浠?func saveConfig(filePath string) error {
+// saveConfig 保存配置到文件
+func saveConfig(filePath string) error {
 	cfg := appConfig{
 		ListenAddr:  listenAddr,
 		ServerAddr:  serverAddr,
@@ -192,13 +210,14 @@ type appConfig struct {
 	}
 	if dir := filepath.Dir(filePath); dir != "" && dir != "." {
 		if err := os.MkdirAll(dir, 0755); err != nil {
-			return fmt.Errorf("鍒涘缓閰嶇疆鐩綍澶辫触: %w", err)
+			return fmt.Errorf("创建配置目录失败: %w", err)
 		}
 	}
 	return os.WriteFile(filePath, data, 0600)
 }
 
-// statusResponse 鐘舵€佸搷搴?type statusResponse struct {
+// statusResponse 状态响应
+type statusResponse struct {
 	Uptime       string  `json:"uptime"`
 	TotalConns   int64   `json:"total_conns"`
 	ActiveConns  int     `json:"active_conns"`
@@ -214,25 +233,25 @@ type appConfig struct {
 }
 
 func init() {
-	flag.StringVar(&listenAddr, "l", "0.0.0.0:30000", "浠ｇ悊鐩戝惉鍦板潃 (鏀寔 SOCKS5 鍜?HTTP)")
-	flag.StringVar(&serverAddr, "f", "hhech.nb1tap.kdns.fr:443", "鏈嶅姟绔湴鍧€ (鏍煎紡: x.x.workers.dev:443)")
-	flag.StringVar(&serverIP, "ip", "", "鎸囧畾鏈嶅姟绔?IP锛堢粫杩?DNS 瑙ｆ瀽锛?)
-	flag.StringVar(&token, "token", "honghongfree", "韬唤楠岃瘉浠ょ墝")
-	flag.StringVar(&dnsServer, "dns", "dns.alidns.com/dns-query", "ECH 鏌ヨ DoH 鏈嶅姟鍣?)
-	flag.StringVar(&echDomain, "ech", "cloudflare-ech.com", "ECH 鏌ヨ鍩熷悕")
-	flag.StringVar(&routingMode, "routing", "bypass_cn", "鍒嗘祦妯″紡: global(鍏ㄥ眬浠ｇ悊), bypass_cn(璺宠繃涓浗澶ч檰), none(涓嶆敼鍙樹唬鐞?, custom(鑷畾涔夎鍒?")
-	flag.StringVar(&webAddr, "web", "", "Web 绠＄悊闈㈡澘鐩戝惉鍦板潃 (濡?:9090)")
-	flag.StringVar(&rulesFile, "rules", "", "鑷畾涔夎鍒欐枃浠惰矾寰?(routing=custom 鏃跺繀闇€)")
-	flag.StringVar(&rulesData, "rules-data", "/data/rules.json", "闈㈡澘瑙勫垯鎸佷箙鍖栨枃浠惰矾寰?)
-	flag.StringVar(&configFile, "config", "/data/config.json", "閰嶇疆鏂囦欢璺緞")
-	flag.StringVar(&proxyIP, "proxyip", "", "鍥哄畾鍑哄彛 IP (濡?101.79.165.113 鎴?101.79.165.113:443)")
-	flag.StringVar(&webPassword, "password", "", "Web 绠＄悊闈㈡澘鐧诲綍瀵嗙爜 (涓虹┖鍒欎笉闇€鐧诲綍)")
-	flag.Float64Var(&downLimitMbps, "downlimit", 0, "鍗曡繛鎺ヤ笅琛岄檺閫?Mbps (0=涓嶉檺)銆傜湅瑙嗛鍗￠】鏃跺缓璁涓虹爜鐜囩殑 1.2~1.5 鍊?)
-	flag.DurationVar(&idleTimeout, "idle-timeout", 15*time.Minute, "闅ч亾绌洪棽瓒呮椂锛屾棤浠讳綍鏁版嵁浜や簰瓒呰繃璇ユ椂闀垮垯鍏抽棴 (0=姘镐笉涓诲姩鍏抽棴)")
+	flag.StringVar(&listenAddr, "l", "0.0.0.0:30000", "代理监听地址 (支持 SOCKS5 和 HTTP)")
+	flag.StringVar(&serverAddr, "f", "hhech.nb1tap.kdns.fr:443", "服务端地址 (格式: x.x.workers.dev:443)")
+	flag.StringVar(&serverIP, "ip", "", "指定服务端 IP（绕过 DNS 解析）")
+	flag.StringVar(&token, "token", "honghongfree", "身份验证令牌")
+	flag.StringVar(&dnsServer, "dns", "dns.alidns.com/dns-query", "ECH 查询 DoH 服务器")
+	flag.StringVar(&echDomain, "ech", "cloudflare-ech.com", "ECH 查询域名")
+	flag.StringVar(&routingMode, "routing", "bypass_cn", "分流模式: global(全局代理), bypass_cn(跳过中国大陆), none(不改变代理), custom(自定义规则)")
+	flag.StringVar(&webAddr, "web", "", "Web 管理面板监听地址 (如 :9090)")
+	flag.StringVar(&rulesFile, "rules", "", "自定义规则文件路径 (routing=custom 时必需)")
+	flag.StringVar(&rulesData, "rules-data", "/data/rules.json", "面板规则持久化文件路径")
+	flag.StringVar(&configFile, "config", "/data/config.json", "配置文件路径")
+	flag.StringVar(&proxyIP, "proxyip", "", "固定出口 IP (如 101.79.165.113 或 101.79.165.113:443)")
+	flag.StringVar(&webPassword, "password", "", "Web 管理面板登录密码 (为空则不需登录)")
+	flag.Float64Var(&downLimitMbps, "downlimit", 0, "单连接下行限速 Mbps (0=不限)。看视频卡顿时建议设为码率的 1.2~1.5 倍")
+	flag.DurationVar(&idleTimeout, "idle-timeout", 15*time.Minute, "隧道空闲超时，无任何数据交互超过该时长则关闭 (0=永不主动关闭)")
 }
 
-// applyEnvDefaults 浠庣幆澧冨彉閲忓姞杞介粯璁ゅ€硷紙鍛戒护琛屽弬鏁颁紭鍏堬級
-// 鏀寔: ECH_LISTEN, ECH_SERVER, ECH_SERVER_IP, ECH_TOKEN, ECH_DNS, ECH_DOMAIN,
+// applyEnvDefaults 从环境变量加载默认值（命令行参数优先）
+// 支持: ECH_LISTEN, ECH_SERVER, ECH_SERVER_IP, ECH_TOKEN, ECH_DNS, ECH_DOMAIN,
 //        ECH_ROUTING, ECH_WEB, ECH_PROXY_IP, ECH_PASSWORD, ECH_CONFIG, ECH_RULES_DATA
 func applyEnvDefaults() {
 	if v := os.Getenv("ECH_LISTEN"); v != "" && listenAddr == "0.0.0.0:30000" {
@@ -286,11 +305,12 @@ func applyEnvDefaults() {
 func main() {
 	flag.Parse()
 
-	// 鐜鍙橀噺锛堝懡浠よ鍙傛暟浼樺厛锛岀幆澧冨彉閲忓叾娆★紝config.json 鏈€鍚庯級
+	// 环境变量（命令行参数优先，环境变量其次，config.json 最后）
 	applyEnvDefaults()
 
-	// 鍔犺浇閰嶇疆鏂囦欢锛堝懡浠よ鍙傛暟 > 鐜鍙橀噺 > config.json锛?	if cfg, err := loadConfig(configFile); err == nil {
-		log.Printf("[鍚姩] 宸插姞杞介厤缃枃浠? %s", configFile)
+	// 加载配置文件（命令行参数 > 环境变量 > config.json）
+	if cfg, err := loadConfig(configFile); err == nil {
+		log.Printf("[启动] 已加载配置文件: %s", configFile)
 		if listenAddr == "0.0.0.0:30000" && cfg.ListenAddr != "" {
 			listenAddr = cfg.ListenAddr
 		}
@@ -328,54 +348,58 @@ func main() {
 			idleTimeout = time.Duration(cfg.IdleTimeoutMin * float64(time.Minute))
 		}
 	} else if configFile != "" {
-		log.Printf("[鍚姩] 閰嶇疆鏂囦欢涓嶅瓨鍦ㄦ垨鏃犳晥锛屼娇鐢ㄥ懡浠よ鍙傛暟")
+		log.Printf("[启动] 配置文件不存在或无效，使用命令行参数")
 	}
 
-	// 濡傛灉娌℃湁閰嶇疆鏂囦欢涓斿懡浠よ鏈夊弬鏁帮紝鑷姩淇濆瓨閰嶇疆
+	// 如果没有配置文件且命令行有参数，自动保存配置
 	if _, err := os.Stat(configFile); os.IsNotExist(err) {
 		if serverAddr != "" {
 			if err := saveConfig(configFile); err != nil {
-				log.Printf("[鍚姩] 淇濆瓨閰嶇疆鏂囦欢澶辫触: %v", err)
+				log.Printf("[启动] 保存配置文件失败: %v", err)
 			} else {
-				log.Printf("[鍚姩] 宸蹭繚瀛橀厤缃埌: %s", configFile)
+				log.Printf("[启动] 已保存配置到: %s", configFile)
 			}
 		}
 	}
 
 	if serverAddr == "" {
-		log.Fatal("蹇呴』鎸囧畾鏈嶅姟绔湴鍧€ -f\n\n绀轰緥:\n  ./client -l 127.0.0.1:1080 -f your-worker.workers.dev:443 -token your-token")
+		log.Fatal("必须指定服务端地址 -f\n\n示例:\n  ./client -l 127.0.0.1:1080 -f your-worker.workers.dev:443 -token your-token")
 	}
 
-	log.Printf("[鍚姩] 姝ｅ湪鑾峰彇 ECH 閰嶇疆...")
+	log.Printf("[启动] 正在获取 ECH 配置...")
 	if err := prepareECH(); err != nil {
-		log.Fatalf("[鍚姩] 鑾峰彇 ECH 閰嶇疆澶辫触: %v", err)
+		log.Fatalf("[启动] 获取 ECH 配置失败: %v", err)
 	}
 
-	// 鍒濆鍖栫粺璁?	startTime = time.Now()
+	// 初始化统计
+	startTime = time.Now()
 	logBuffer = make([]logEntry, 0, 200)
 	dnsCache = make(map[string]dnsCacheEntry)
 
-	// 璁剧疆鏃ュ織鍚屾椂鍐欏叆缂撳啿鍖?	log.SetOutput(&logWriter{original: os.Stderr})
-	log.Printf("[娴嬭瘯] 鏃ュ織绯荤粺宸插垵濮嬪寲")
+	// 设置日志同时写入缓冲区
+	log.SetOutput(&logWriter{original: os.Stderr})
+	log.Printf("[测试] 日志系统已初始化")
 
-	// 鍔犺浇鑷畾涔夎鍒?	if routingMode == "custom" {
+	// 加载自定义规则
+	if routingMode == "custom" {
 		if rulesFile == "" {
-			log.Fatal("[鍚姩] custom 鍒嗘祦妯″紡闇€瑕佹寚瀹氳鍒欐枃浠?-rules")
+			log.Fatal("[启动] custom 分流模式需要指定规则文件 -rules")
 		}
 		if err := loadCustomRules(rulesFile); err != nil {
-			log.Fatalf("[鍚姩] 鍔犺浇鑷畾涔夎鍒欏け璐? %v", err)
+			log.Fatalf("[启动] 加载自定义规则失败: %v", err)
 		}
 		customRulesMu.RLock()
-		log.Printf("[鍚姩] 宸插姞杞?%d 鏉¤嚜瀹氫箟瑙勫垯", len(customRules))
+		log.Printf("[启动] 已加载 %d 条自定义规则", len(customRules))
 		customRulesMu.RUnlock()
 	}
 
-	// 鍔犺浇涓浗IP鍒楄〃锛堝缁堝姞杞斤紝渚涘垎娴佸拰鍚庡彴鏇存柊浣跨敤锛?	{
+	// 加载中国IP列表（始终加载，供分流和后台更新使用）
+	{
 		ipv4Count := 0
 		ipv6Count := 0
 
 		if err := loadChinaIPList(); err != nil {
-			log.Printf("[璀﹀憡] 鍔犺浇涓浗IPv4鍒楄〃澶辫触: %v", err)
+			log.Printf("[警告] 加载中国IPv4列表失败: %v", err)
 		} else {
 			chinaIPRangesMu.RLock()
 			ipv4Count = len(chinaIPRanges)
@@ -383,7 +407,7 @@ func main() {
 		}
 
 		if err := loadChinaIPV6List(); err != nil {
-			log.Printf("[璀﹀憡] 鍔犺浇涓浗IPv6鍒楄〃澶辫触: %v", err)
+			log.Printf("[警告] 加载中国IPv6列表失败: %v", err)
 		} else {
 			chinaIPV6RangesMu.RLock()
 			ipv6Count = len(chinaIPV6Ranges)
@@ -391,46 +415,50 @@ func main() {
 		}
 
 		if ipv4Count > 0 || ipv6Count > 0 {
-			log.Printf("[鍚姩] 宸插姞杞?%d 涓腑鍥絀Pv4娈? %d 涓腑鍥絀Pv6娈?, ipv4Count, ipv6Count)
+			log.Printf("[启动] 已加载 %d 个中国IPv4段, %d 个中国IPv6段", ipv4Count, ipv6Count)
 		} else {
-			log.Printf("[璀﹀憡] 鏈姞杞藉埌浠讳綍涓浗IP鍒楄〃")
+			log.Printf("[警告] 未加载到任何中国IP列表")
 		}
 	}
 
-	// ProxyIP 鎻愮ず
+	// ProxyIP 提示
 	if proxyIP != "" {
-		log.Printf("[鍚姩] 鍥哄畾鍑哄彛 IP: %s", proxyIP)
+		log.Printf("[启动] 固定出口 IP: %s", proxyIP)
 	}
 
-	// 鍚姩鍑哄彛IP妫€娴?	log.Printf("[鍚姩] 鍚姩鍑哄彛IP妫€娴嬪櫒...")
+	// 启动出口IP检测
+	log.Printf("[启动] 启动出口IP检测器...")
 
-	// 鍔犺浇闈㈡澘瑙勫垯鎸佷箙鍖栨枃浠?	loadRulesDataFile()
+	// 加载面板规则持久化文件
+	loadRulesDataFile()
 
 	startExitInfoDetector()
 
-	// 鍒濆鍖?web 浼氳瘽绠＄悊
+	// 初始化 web 会话管理
 	webSessions = make(map[string]time.Time)
 	go startSessionGC()
 
-	// 鍚姩 Web 绠＄悊闈㈡澘
+	// 启动 Web 管理面板
 	if webAddr != "" {
 		go startWebServer(webAddr)
 	}
 
-	// 鍚姩鍚庡彴 IP 鍒楄〃鏇存柊鍣紙浠ｇ悊灏辩华鍚庣粡闅ч亾鏇存柊锛?	go startChinaIPBackgroundUpdater()
+	// 启动后台 IP 列表更新器（代理就绪后经隧道更新）
+	go startChinaIPBackgroundUpdater()
 
-	// 浼橀泤閫€鍑?	sigChan := make(chan os.Signal, 1)
+	// 优雅退出
+	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-sigChan
-		log.Printf("[閫€鍑篯 鏀跺埌缁堟淇″彿锛屾鍦ㄥ叧闂?..")
+		log.Printf("[退出] 收到终止信号，正在关闭...")
 		os.Exit(0)
 	}()
 
 	runProxyServer(listenAddr)
 }
 
-// ======================== 鏃ュ織缂撳啿 ========================
+// ======================== 日志缓冲 ========================
 
 type logWriter struct {
 	original io.Writer
@@ -445,9 +473,9 @@ func (w *logWriter) Write(p []byte) (n int, err error) {
 	msg := strings.TrimSpace(string(p))
 	if msg != "" {
 		level := "info"
-		if strings.Contains(msg, "[璀﹀憡]") || strings.Contains(msg, "warn") {
+		if strings.Contains(msg, "[警告]") || strings.Contains(msg, "warn") {
 			level = "warn"
-		} else if strings.Contains(msg, "[閿欒]") || strings.Contains(msg, "fatal") || strings.Contains(msg, "error") {
+		} else if strings.Contains(msg, "[错误]") || strings.Contains(msg, "fatal") || strings.Contains(msg, "error") {
 			level = "error"
 		}
 		addLog(level, msg)
@@ -455,9 +483,9 @@ func (w *logWriter) Write(p []byte) (n int, err error) {
 	return w.original.Write(p)
 }
 
-// ======================== 宸ュ叿鍑芥暟 ========================
+// ======================== 工具函数 ========================
 
-// ipToUint32 灏咺P鍦板潃杞崲涓簎int32
+// ipToUint32 将IP地址转换为uint32
 func ipToUint32(ip net.IP) uint32 {
 	ip = ip.To4()
 	if ip == nil {
@@ -466,13 +494,14 @@ func ipToUint32(ip net.IP) uint32 {
 	return uint32(ip[0])<<24 | uint32(ip[1])<<16 | uint32(ip[2])<<8 | uint32(ip[3])
 }
 
-// isChinaIP 妫€鏌P鏄惁鍦ㄤ腑鍥絀P鍒楄〃涓紙鏀寔IPv4鍜孖Pv6锛?func isChinaIP(ipStr string) bool {
+// isChinaIP 检查IP是否在中国IP列表中（支持IPv4和IPv6）
+func isChinaIP(ipStr string) bool {
 	ip := net.ParseIP(ipStr)
 	if ip == nil {
 		return false
 	}
 
-	// 妫€鏌Pv4
+	// 检查IPv4
 	if ip.To4() != nil {
 		ipUint32 := ipToUint32(ip)
 		if ipUint32 == 0 {
@@ -485,7 +514,7 @@ func ipToUint32(ip net.IP) uint32 {
 		return findIPv4Range(chinaIPRanges, ipUint32)
 	}
 
-	// 妫€鏌Pv6
+	// 检查IPv6
 	ipBytes := ip.To16()
 	if ipBytes == nil {
 		return false
@@ -497,33 +526,33 @@ func ipToUint32(ip net.IP) uint32 {
 	chinaIPV6RangesMu.RLock()
 	defer chinaIPV6RangesMu.RUnlock()
 
-	// 浜屽垎鏌ユ壘IPv6
+	// 二分查找IPv6
 	left, right := 0, len(chinaIPV6Ranges)
 	for left < right {
 		mid := (left + right) / 2
 		r := chinaIPV6Ranges[mid]
 
-		// 姣旇緝璧峰IP
+		// 比较起始IP
 		cmpStart := compareIPv6(ipArray, r.start)
 		if cmpStart < 0 {
 			right = mid
 			continue
 		}
 
-		// 姣旇緝缁撴潫IP
+		// 比较结束IP
 		cmpEnd := compareIPv6(ipArray, r.end)
 		if cmpEnd > 0 {
 			left = mid + 1
 			continue
 		}
 
-		// 鍦ㄨ寖鍥村唴
+		// 在范围内
 		return true
 	}
 	return false
 }
 
-// compareIPv6 姣旇緝涓や釜IPv6鍦板潃锛岃繑鍥?-1, 0, 鎴?1
+// compareIPv6 比较两个IPv6地址，返回 -1, 0, 或 1
 func compareIPv6(a, b [16]byte) int {
 	for i := 0; i < 16; i++ {
 		if a[i] < b[i] {
@@ -535,9 +564,9 @@ func compareIPv6(a, b [16]byte) int {
 	return 0
 }
 
-// downloadIPList 涓嬭浇IP鍒楄〃鏂囦欢
+// downloadIPList 下载IP列表文件
 func downloadIPList(url, filePath string) error {
-	log.Printf("[涓嬭浇] 姝ｅ湪涓嬭浇 IP 鍒楄〃: %s", url)
+	log.Printf("[下载] 正在下载 IP 列表: %s", url)
 
 	client := &http.Client{
 		Timeout: 30 * time.Second,
@@ -545,31 +574,32 @@ func downloadIPList(url, filePath string) error {
 
 	resp, err := client.Get(url)
 	if err != nil {
-		return fmt.Errorf("涓嬭浇澶辫触: %w", err)
+		return fmt.Errorf("下载失败: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("涓嬭浇澶辫触: HTTP %d", resp.StatusCode)
+		return fmt.Errorf("下载失败: HTTP %d", resp.StatusCode)
 	}
 
-	// 璇诲彇鍐呭
+	// 读取内容
 	content, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return fmt.Errorf("璇诲彇涓嬭浇鍐呭澶辫触: %w", err)
+		return fmt.Errorf("读取下载内容失败: %w", err)
 	}
 
-	// 淇濆瓨鍒版枃浠?	if err := os.WriteFile(filePath, content, 0644); err != nil {
-		return fmt.Errorf("淇濆瓨鏂囦欢澶辫触: %w", err)
+	// 保存到文件
+	if err := os.WriteFile(filePath, content, 0644); err != nil {
+		return fmt.Errorf("保存文件失败: %w", err)
 	}
 
-	log.Printf("[涓嬭浇] 宸蹭繚瀛樺埌: %s", filePath)
+	log.Printf("[下载] 已保存到: %s", filePath)
 	return nil
 }
 
-// startChinaIPBackgroundUpdater 浠ｇ悊灏辩华鍚庣粡 ECH 闅ч亾鍚庡彴鏇存柊涓浗 IP 鍒楄〃
+// startChinaIPBackgroundUpdater 代理就绪后经 ECH 隧道后台更新中国 IP 列表
 func startChinaIPBackgroundUpdater() {
-	// 绛夊緟浠ｇ悊鍚姩瀹屾垚
+	// 等待代理启动完成
 	time.Sleep(10 * time.Second)
 
 	interval := 24 * time.Hour
@@ -577,55 +607,58 @@ func startChinaIPBackgroundUpdater() {
 	defer ticker.Stop()
 
 	for range ticker.C {
-		// 妫€鏌ヤ唬鐞嗘槸鍚﹀彲鐢?		if activeConnCnt.Load() == 0 && !isProxyReady() {
-			log.Printf("[鏇存柊] 浠ｇ悊灏氭湭灏辩华锛岃烦杩囨湰娆℃洿鏂?)
+		// 检查代理是否可用
+		if activeConnCnt.Load() == 0 && !isProxyReady() {
+			log.Printf("[更新] 代理尚未就绪，跳过本次更新")
 			continue
 		}
 
-		log.Printf("[鏇存柊] 寮€濮嬪悗鍙版洿鏂颁腑鍥絀P鍒楄〃...")
+		log.Printf("[更新] 开始后台更新中国IP列表...")
 
-		// 涓嬭浇 IPv4 鍒楄〃
+		// 下载 IPv4 列表
 		if err := downloadAndApplyIPList(
 			"https://raw.githubusercontent.com/mayaxcn/china-ip-list/refs/heads/master/chnroute.txt",
 			"/data/chn_ip.txt",
 			loadChinaIPList,
 		); err != nil {
-			log.Printf("[鏇存柊] IPv4 鍒楄〃鏇存柊澶辫触: %v", err)
+			log.Printf("[更新] IPv4 列表更新失败: %v", err)
 		}
 
-		// 涓嬭浇 IPv6 鍒楄〃
+		// 下载 IPv6 列表
 		if err := downloadAndApplyIPList(
 			"https://raw.githubusercontent.com/mayaxcn/china-ip-list/refs/heads/master/chnroute_v6.txt",
 			"/data/chn_ip_v6.txt",
 			loadChinaIPV6List,
 		); err != nil {
-			log.Printf("[鏇存柊] IPv6 鍒楄〃鏇存柊澶辫触: %v", err)
+			log.Printf("[更新] IPv6 列表更新失败: %v", err)
 		}
 	}
 }
 
-// downloadAndApplyIPList 涓嬭浇銆佹牎楠屻€佸師瀛愭浛鎹?IP 鍒楄〃
+// downloadAndApplyIPList 下载、校验、原子替换 IP 列表
 func downloadAndApplyIPList(url, filePath string, loadFn func() error) error {
-	// 涓嬭浇鍒颁复鏃舵枃浠?	tmpFile := filePath + ".tmp"
+	// 下载到临时文件
+	tmpFile := filePath + ".tmp"
 	if err := downloadIPList(url, tmpFile); err != nil {
 		return err
 	}
 
-	// 灏濊瘯鍔犺浇鏂版枃浠惰繘琛屾牎楠?	if err := loadFn(); err != nil {
+	// 尝试加载新文件进行校验
+	if err := loadFn(); err != nil {
 		os.Remove(tmpFile)
-		return fmt.Errorf("鏍￠獙澶辫触: %w", err)
+		return fmt.Errorf("校验失败: %w", err)
 	}
 
-	// 鏍￠獙閫氳繃锛屾浛鎹㈠師鏂囦欢
+	// 校验通过，替换原文件
 	if err := os.Rename(tmpFile, filePath); err != nil {
-		return fmt.Errorf("鏇挎崲鏂囦欢澶辫触: %w", err)
+		return fmt.Errorf("替换文件失败: %w", err)
 	}
 
-	log.Printf("[鏇存柊] 宸叉洿鏂? %s", filePath)
+	log.Printf("[更新] 已更新: %s", filePath)
 	return nil
 }
 
-// isProxyReady 妫€鏌ヤ唬鐞嗘槸鍚﹀凡鍚姩锛堢畝鍗曟鏌ワ級
+// isProxyReady 检查代理是否已启动（简单检查）
 func isProxyReady() bool {
 	conn, err := net.DialTimeout("tcp", listenAddr, 2*time.Second)
 	if err != nil {
@@ -635,9 +668,9 @@ func isProxyReady() bool {
 	return true
 }
 
-// loadChinaIPList 鍔犺浇涓浗IPv4鍒楄〃锛堜紭鍏堣鍐呯疆鏂囦欢锛屽啀璇?/data 鎸佷箙鍖栨枃浠讹級
+// loadChinaIPList 加载中国IPv4列表（优先读内置文件，再读 /data 持久化文件）
 func loadChinaIPList() error {
-	// 鏌ユ壘椤哄簭锛?data/鏇存柊鏂囦欢 > /usr/local/bin/鍐呯疆鏂囦欢 > ./褰撳墠鐩綍
+	// 查找顺序：/data/更新文件 > /usr/local/bin/内置文件 > ./当前目录
 	searchPaths := []string{
 		"/data/chn_ip.txt",
 		"/usr/local/bin/chn_ip.txt",
@@ -652,12 +685,12 @@ func loadChinaIPList() error {
 		}
 	}
 	if ipListFile == "" {
-		return fmt.Errorf("涓浗IPv4鍒楄〃鏂囦欢涓嶅瓨鍦紙宸插唴缃増鏈笉鍙敤锛?)
+		return fmt.Errorf("中国IPv4列表文件不存在（已内置版本不可用）")
 	}
 
 	file, err := os.Open(ipListFile)
 	if err != nil {
-		return fmt.Errorf("鎵撳紑IP鍒楄〃鏂囦欢澶辫触: %w", err)
+		return fmt.Errorf("打开IP列表文件失败: %w", err)
 	}
 	defer file.Close()
 
@@ -675,7 +708,7 @@ func loadChinaIPList() error {
 			continue
 		}
 
-		// 鏀寔 CIDR 鏍煎紡: 1.0.1.0/24
+		// 支持 CIDR 格式: 1.0.1.0/24
 		if len(parts) == 1 && strings.Contains(parts[0], "/") {
 			_, cidr, err := net.ParseCIDR(parts[0])
 			if err != nil {
@@ -689,7 +722,7 @@ func loadChinaIPList() error {
 			continue
 		}
 
-		// 鏀寔 "startIP endIP" 鏍煎紡
+		// 支持 "startIP endIP" 格式
 		if len(parts) < 2 {
 			continue
 		}
@@ -708,21 +741,22 @@ func loadChinaIPList() error {
 	}
 
 	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("璇诲彇IP鍒楄〃鏂囦欢澶辫触: %w", err)
+		return fmt.Errorf("读取IP列表文件失败: %w", err)
 	}
 
 	if len(ranges) == 0 {
-		return errors.New("IP鍒楄〃涓虹┖")
+		return errors.New("IP列表为空")
 	}
 
-	// 鎸夎捣濮婭P鎺掑簭
+	// 按起始IP排序
 	sort.Slice(ranges, func(i, j int) bool {
 		return ranges[i].start < ranges[j].start
 	})
 
-	// 鍚堝苟閲嶅彔/鐩搁偦鍖洪棿锛屼繚璇佷簩鍒嗘煡鎵炬纭?	ranges = mergeIPv4Ranges(ranges)
+	// 合并重叠/相邻区间，保证二分查找正确
+	ranges = mergeIPv4Ranges(ranges)
 
-	// 瀹夊叏妫€鏌ワ細纭繚宸茬煡鍥藉IP涓嶄細琚鍒や负涓浗IP
+	// 安全检查：确保已知国外IP不会被误判为中国IP
 	foreignSamples := []string{"8.8.8.8", "1.1.1.1", "91.108.56.130", "172.67.74.152", "104.16.0.1"}
 	bad := 0
 	for _, s := range foreignSamples {
@@ -731,8 +765,8 @@ func loadChinaIPList() error {
 		}
 	}
 	if bad > 0 {
-		os.Remove(ipListFile) // 鍒犻櫎鎹熷潖鐨勫垪琛紝涓嬫鍚姩閲嶆柊涓嬭浇
-		return fmt.Errorf("IP鍒楄〃鏍￠獙澶辫触: 宸茬煡鍥藉IP琚鍒や负涓浗IP (%d/%d)锛屽凡涓㈠純璇ュ垪琛ㄥ苟鍥為€€涓哄叏灞€浠ｇ悊", bad, len(foreignSamples))
+		os.Remove(ipListFile) // 删除损坏的列表，下次启动重新下载
+		return fmt.Errorf("IP列表校验失败: 已知国外IP被误判为中国IP (%d/%d)，已丢弃该列表并回退为全局代理", bad, len(foreignSamples))
 	}
 
 	chinaIPRangesMu.Lock()
@@ -742,7 +776,7 @@ func loadChinaIPList() error {
 	return nil
 }
 
-// lastIP 杩斿洖 CIDR 缃戠粶鐨勬渶鍚庝竴涓?IP
+// lastIP 返回 CIDR 网络的最后一个 IP
 func lastIP(n *net.IPNet) net.IP {
 	ip := n.IP.To4()
 	if ip == nil {
@@ -755,7 +789,7 @@ func lastIP(n *net.IPNet) net.IP {
 	return last
 }
 
-// lastIPv6 杩斿洖 IPv6 CIDR 缃戠粶鐨勬渶鍚庝竴涓?IP
+// lastIPv6 返回 IPv6 CIDR 网络的最后一个 IP
 func lastIPv6(n *net.IPNet) net.IP {
 	ip := n.IP.To16()
 	if ip == nil {
@@ -768,7 +802,8 @@ func lastIPv6(n *net.IPNet) net.IP {
 	return last
 }
 
-// mergeIPv4Ranges 鍚堝苟閲嶅彔鎴栫浉閭荤殑鍖洪棿锛堣緭鍏ラ渶宸叉寜 start 鍗囧簭鎺掑簭锛?func mergeIPv4Ranges(ranges []ipRange) []ipRange {
+// mergeIPv4Ranges 合并重叠或相邻的区间（输入需已按 start 升序排序）
+func mergeIPv4Ranges(ranges []ipRange) []ipRange {
 	if len(ranges) == 0 {
 		return ranges
 	}
@@ -789,7 +824,7 @@ func lastIPv6(n *net.IPNet) net.IP {
 	return merged
 }
 
-// findIPv4Range 鍦ㄥ凡鎺掑簭涓斾笉閲嶅彔鐨勫尯闂翠腑浜屽垎鏌ユ壘
+// findIPv4Range 在已排序且不重叠的区间中二分查找
 func findIPv4Range(ranges []ipRange, ip uint32) bool {
 	left, right := 0, len(ranges)
 	for left < right {
@@ -806,9 +841,9 @@ func findIPv4Range(ranges []ipRange, ip uint32) bool {
 	return false
 }
 
-// loadChinaIPV6List 鍔犺浇涓浗IPv6鍒楄〃锛堜紭鍏堣鍐呯疆鏂囦欢锛屽啀璇?/data 鎸佷箙鍖栨枃浠讹級
+// loadChinaIPV6List 加载中国IPv6列表（优先读内置文件，再读 /data 持久化文件）
 func loadChinaIPV6List() error {
-	// 鏌ユ壘椤哄簭锛?data/鏇存柊鏂囦欢 > /usr/local/bin/鍐呯疆鏂囦欢 > ./褰撳墠鐩綍
+	// 查找顺序：/data/更新文件 > /usr/local/bin/内置文件 > ./当前目录
 	searchPaths := []string{
 		"/data/chn_ip_v6.txt",
 		"/usr/local/bin/chn_ip_v6.txt",
@@ -823,12 +858,14 @@ func loadChinaIPV6List() error {
 		}
 	}
 	if ipListFile == "" {
-		log.Printf("[鍔犺浇] IPv6 鍒楄〃鏂囦欢涓嶅瓨鍦紝灏嗚烦杩?IPv6 鏀寔")
-		return nil // IPv6 鍒楄〃涓嶅瓨鍦ㄤ笉绠楄嚧鍛介敊璇?	}
+		log.Printf("[加载] IPv6 列表文件不存在，将跳过 IPv6 支持")
+		return nil // IPv6 列表不存在不算致命错误
+	}
 
 	file, err := os.Open(ipListFile)
 	if err != nil {
-		// 鏂囦欢鎵撳紑澶辫触锛屼笉绠楄嚧鍛介敊璇?		log.Printf("[璀﹀憡] 鎵撳紑 IPv6 IP鍒楄〃鏂囦欢澶辫触: %v锛屽皢璺宠繃 IPv6 鏀寔", err)
+		// 文件打开失败，不算致命错误
+		log.Printf("[警告] 打开 IPv6 IP列表文件失败: %v，将跳过 IPv6 支持", err)
 		return nil
 	}
 	defer file.Close()
@@ -843,7 +880,7 @@ func loadChinaIPV6List() error {
 
 		parts := strings.Fields(line)
 
-		// CIDR 鏍煎紡: 2001:250::/35
+		// CIDR 格式: 2001:250::/35
 		if len(parts) == 1 && strings.Contains(parts[0], "/") {
 			_, cidr, err := net.ParseCIDR(parts[0])
 			if err != nil {
@@ -863,7 +900,7 @@ func loadChinaIPV6List() error {
 			continue
 		}
 
-		// "startIP endIP" 鏍煎紡
+		// "startIP endIP" 格式
 		if len(parts) < 2 {
 			continue
 		}
@@ -890,14 +927,15 @@ func loadChinaIPV6List() error {
 	}
 
 	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("璇诲彇IPv6 IP鍒楄〃鏂囦欢澶辫触: %w", err)
+		return fmt.Errorf("读取IPv6 IP列表文件失败: %w", err)
 	}
 
 	if len(ranges) == 0 {
-		// IPv6鍒楄〃涓虹┖涓嶇畻閿欒锛屽彲鑳芥枃浠朵笉瀛樺湪鎴栦负绌?		return nil
+		// IPv6列表为空不算错误，可能文件不存在或为空
+		return nil
 	}
 
-	// 鎸夎捣濮婭P鎺掑簭
+	// 按起始IP排序
 	sort.Slice(ranges, func(i, j int) bool {
 		return compareIPv6(ranges[i].start, ranges[j].start) < 0
 	})
@@ -909,7 +947,7 @@ func loadChinaIPV6List() error {
 	return nil
 }
 
-// lookupIPWithCache 甯︾紦瀛樼殑 DNS 鏌ヨ
+// lookupIPWithCache 带缓存的 DNS 查询
 func lookupIPWithCache(host string) ([]net.IP, error) {
 	dnsCacheMu.RLock()
 	entry, ok := dnsCache[host]
@@ -927,9 +965,9 @@ func lookupIPWithCache(host string) ([]net.IP, error) {
 	dnsCacheMu.Lock()
 	dnsCache[host] = dnsCacheEntry{
 		ips:       ips,
-		expiresAt: time.Now().Add(5 * time.Minute), // 缂撳瓨 5 鍒嗛挓
+		expiresAt: time.Now().Add(5 * time.Minute), // 缓存 5 分钟
 	}
-	// 绠€鍗曟竻鐞嗭細瓒呰繃 1000 鏉℃椂娓呯┖
+	// 简单清理：超过 1000 条时清空
 	if len(dnsCache) > 1000 {
 		for k := range dnsCache {
 			delete(dnsCache, k)
@@ -940,44 +978,49 @@ func lookupIPWithCache(host string) ([]net.IP, error) {
 	return ips, nil
 }
 
-// shouldBypassProxy 鏍规嵁鍒嗘祦妯″紡鍒ゆ柇鏄惁搴旇缁曡繃浠ｇ悊锛堢洿杩烇級
+// shouldBypassProxy 根据分流模式判断是否应该绕过代理（直连）
 func shouldBypassProxy(targetHost string) bool {
-	// 1. 鑷畾涔夎鍒欎紭鍏堢骇鏈€楂橈紙浠讳綍鍒嗘祦妯″紡涓嬮兘鐢熸晥锛?	if matched, bypass := matchCustomRule(targetHost); matched {
+	// 1. 自定义规则优先级最高（任何分流模式下都生效）
+	if matched, bypass := matchCustomRule(targetHost); matched {
 		return bypass
 	}
 
-	// 2. 鎸夊垎娴佹ā寮忓喅瀹?	switch routingMode {
+	// 2. 按分流模式决定
+	switch routingMode {
 	case "none":
-		// "涓嶆敼鍙樹唬鐞?妯″紡锛氭墍鏈夋祦閲忛兘鐩磋繛
+		// "不改变代理"模式：所有流量都直连
 		return true
 	case "global":
-		// "鍏ㄥ眬浠ｇ悊"妯″紡锛氭墍鏈夋祦閲忛兘璧颁唬鐞?		return false
+		// "全局代理"模式：所有流量都走代理
+		return false
 	case "custom":
-		// 鑷畾涔夎鍒欐ā寮忥細鏃犲尮閰嶈鍒欐椂榛樿璧颁唬鐞?		return false
+		// 自定义规则模式：无匹配规则时默认走代理
+		return false
 	case "bypass_cn":
-		// "璺宠繃涓浗澶ч檰"妯″紡锛氭鏌ユ槸鍚︽槸涓浗IP
+		// "跳过中国大陆"模式：检查是否是中国IP
 		if ip := net.ParseIP(targetHost); ip != nil {
 			return isChinaIP(targetHost)
 		}
-		// 濡傛灉鏄煙鍚嶏紝鍏堣В鏋怚P锛堝甫缂撳瓨锛?		ips, err := lookupIPWithCache(targetHost)
+		// 如果是域名，先解析IP（带缓存）
+		ips, err := lookupIPWithCache(targetHost)
 		if err != nil {
-			// 瑙ｆ瀽澶辫触锛岄粯璁よ蛋浠ｇ悊
+			// 解析失败，默认走代理
 			return false
 		}
-		// 妫€鏌ユ墍鏈夎В鏋愬埌鐨処P锛屽鏋滄湁涓€涓槸涓浗IP锛屽氨鐩磋繛
+		// 检查所有解析到的IP，如果有一个是中国IP，就直连
 		for _, ip := range ips {
 			if isChinaIP(ip.String()) {
 				return true
 			}
 		}
-		// 閮戒笉鏄腑鍥絀P锛岃蛋浠ｇ悊
+		// 都不是中国IP，走代理
 		return false
 	}
-	// 鏈煡妯″紡锛岄粯璁よ蛋浠ｇ悊
+	// 未知模式，默认走代理
 	return false
 }
 
-// matchCustomRule 鍖归厤鑷畾涔夎鍒欙紝杩斿洖 (鏄惁鍛戒腑, 鏄惁鐩磋繛)
+// matchCustomRule 匹配自定义规则，返回 (是否命中, 是否直连)
 func matchCustomRule(targetHost string) (bool, bool) {
 	customRulesMu.RLock()
 	defer customRulesMu.RUnlock()
@@ -992,7 +1035,7 @@ func matchCustomRule(targetHost string) (bool, bool) {
 	}
 	host = strings.ToLower(strings.TrimSuffix(host, "."))
 
-	// 妫€鏌ユ槸鍚︽槸IP鍦板潃
+	// 检查是否是IP地址
 	isIP := net.ParseIP(host) != nil
 
 	for _, rule := range customRules {
@@ -1001,14 +1044,14 @@ func matchCustomRule(targetHost string) (bool, bool) {
 			if !isIP {
 				value := strings.ToLower(strings.TrimSpace(rule.Value))
 				matched := false
-				// 鏀寔閫氶厤绗?*.domain
+				// 支持通配符 *.domain
 				if strings.HasPrefix(value, "*.") {
 					suffix := strings.TrimPrefix(value, "*.")
 					if host == suffix || strings.HasSuffix(host, "."+suffix) {
 						matched = true
 					}
 				} else {
-					// 绮剧‘鍖归厤鎴栧瓙鍩熷悕鍖归厤
+					// 精确匹配或子域名匹配
 					if host == value || strings.HasSuffix(host, "."+value) {
 						matched = true
 					}
@@ -1033,7 +1076,7 @@ func matchCustomRule(targetHost string) (bool, bool) {
 			}
 		}
 	}
-	// 娌℃湁鍖归厤瑙勫垯
+	// 没有匹配规则
 	return false, false
 }
 
@@ -1051,13 +1094,13 @@ func isNormalCloseError(err error) bool {
 		strings.Contains(errStr, "normal closure")
 }
 
-// ======================== 鑷畾涔夎鍒?========================
+// ======================== 自定义规则 ========================
 
-// loadCustomRules 浠庢枃浠跺姞杞借嚜瀹氫箟瑙勫垯
+// loadCustomRules 从文件加载自定义规则
 func loadCustomRules(filePath string) error {
 	file, err := os.Open(filePath)
 	if err != nil {
-		return fmt.Errorf("鎵撳紑瑙勫垯鏂囦欢澶辫触: %w", err)
+		return fmt.Errorf("打开规则文件失败: %w", err)
 	}
 	defer file.Close()
 
@@ -1093,7 +1136,7 @@ func loadCustomRules(filePath string) error {
 	}
 
 	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("璇诲彇瑙勫垯鏂囦欢澶辫触: %w", err)
+		return fmt.Errorf("读取规则文件失败: %w", err)
 	}
 
 	customRulesMu.Lock()
@@ -1103,23 +1146,23 @@ func loadCustomRules(filePath string) error {
 	return nil
 }
 
-// saveCustomRules 淇濆瓨鑷畾涔夎鍒欏埌鏂囦欢
+// saveCustomRules 保存自定义规则到文件
 func saveCustomRules(filePath string) error {
 	customRulesMu.RLock()
 	rules := make([]customRule, len(customRules))
 	copy(rules, customRules)
 	customRulesMu.RUnlock()
 
-	// 纭繚鐩綍瀛樺湪
+	// 确保目录存在
 	if dir := filepath.Dir(filePath); dir != "" && dir != "." {
 		if err := os.MkdirAll(dir, 0755); err != nil {
-			return fmt.Errorf("鍒涘缓瑙勫垯鐩綍澶辫触: %w", err)
+			return fmt.Errorf("创建规则目录失败: %w", err)
 		}
 	}
 
 	file, err := os.Create(filePath)
 	if err != nil {
-		return fmt.Errorf("鍒涘缓瑙勫垯鏂囦欢澶辫触: %w", err)
+		return fmt.Errorf("创建规则文件失败: %w", err)
 	}
 	defer file.Close()
 
@@ -1130,7 +1173,7 @@ func saveCustomRules(filePath string) error {
 	return nil
 }
 
-// loadRulesDataFile 浠庨潰鏉胯鍒欐寔涔呭寲鏂囦欢鍔犺浇瑙勫垯
+// loadRulesDataFile 从面板规则持久化文件加载规则
 func loadRulesDataFile() {
 	if rulesData == "" {
 		return
@@ -1139,17 +1182,17 @@ func loadRulesDataFile() {
 		return
 	}
 	if err := loadCustomRules(rulesData); err != nil {
-		log.Printf("[瑙勫垯] 鍔犺浇闈㈡澘瑙勫垯澶辫触: %v", err)
+		log.Printf("[规则] 加载面板规则失败: %v", err)
 	} else {
 		customRulesMu.RLock()
-		log.Printf("[瑙勫垯] 宸蹭粠闈㈡澘瑙勫垯鏂囦欢鍔犺浇 %d 鏉¤鍒?, len(customRules))
+		log.Printf("[规则] 已从面板规则文件加载 %d 条规则", len(customRules))
 		customRulesMu.RUnlock()
 	}
 }
 
-// ======================== 杩炴帴杩借釜涓庢祦閲忕粺璁?========================
+// ======================== 连接追踪与流量统计 ========================
 
-// addConn 娣诲姞杩炴帴杩借釜
+// addConn 添加连接追踪
 func addConn(source, target, mode, rule string) string {
 	id := fmt.Sprintf("%d", connIDCounter.Add(1))
 	info := &connInfo{
@@ -1166,7 +1209,8 @@ func addConn(source, target, mode, rule string) string {
 	return id
 }
 
-// removeConn 绉婚櫎杩炴帴杩借釜锛屽皢娴侀噺璁″叆鎬荤粺璁?func removeConn(id string) {
+// removeConn 移除连接追踪，将流量计入总统计
+func removeConn(id string) {
 	if v, ok := activeConns.LoadAndDelete(id); ok {
 		activeConnCnt.Add(-1)
 		info := v.(*connInfo)
@@ -1177,7 +1221,8 @@ func addConn(source, target, mode, rule string) string {
 	}
 }
 
-// getActiveConns 鑾峰彇鎵€鏈夋椿璺冭繛鎺?func getActiveConns() []connInfoResp {
+// getActiveConns 获取所有活跃连接
+func getActiveConns() []connInfoResp {
 	var conns []connInfoResp
 	activeConns.Range(func(key, value interface{}) bool {
 		info := value.(*connInfo)
@@ -1196,7 +1241,8 @@ func addConn(source, target, mode, rule string) string {
 	return conns
 }
 
-// addLog 娣诲姞鏃ュ織鍒扮紦鍐?func addLog(level, msg string) {
+// addLog 添加日志到缓冲
+func addLog(level, msg string) {
 	entry := logEntry{
 		Time:  time.Now().Format("2006-01-02 15:04:05"),
 		Level: level,
@@ -1210,21 +1256,22 @@ func addConn(source, target, mode, rule string) string {
 	logBufferMu.Unlock()
 }
 
-// ======================== Web 绠＄悊闈㈡澘 ========================
+// ======================== Web 管理面板 ========================
 
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool { return true },
 }
 
-// startWebServer 鍚姩 Web 绠＄悊闈㈡澘
+// startWebServer 启动 Web 管理面板
 func startWebServer(addr string) {
 	mux := http.NewServeMux()
 
-	// 鐧诲綍/鐧诲嚭锛堜笉闇€閴存潈锛?	mux.HandleFunc("/login", handleLogin)
+	// 登录/登出（不需鉴权）
+	mux.HandleFunc("/login", handleLogin)
 	mux.HandleFunc("/api/login", handleAPILogin)
 	mux.HandleFunc("/api/logout", handleAPILogout)
 
-	// 闇€瑕侀壌鏉冪殑璺敱
+	// 需要鉴权的路由
 	mux.Handle("/", authMiddleware(http.HandlerFunc(handleIndex)))
 	mux.Handle("/api/status", authMiddleware(http.HandlerFunc(handleStatus)))
 	mux.Handle("/api/config", authMiddleware(http.HandlerFunc(handleConfig)))
@@ -1236,13 +1283,13 @@ func startWebServer(addr string) {
 	mux.Handle("/api/exit-info", authMiddleware(http.HandlerFunc(handleExitInfo)))
 	mux.Handle("/ws", authMiddleware(http.HandlerFunc(handleWebSocket)))
 
-	log.Printf("[Web] 绠＄悊闈㈡澘鍚姩: http://%s", addr)
+	log.Printf("[Web] 管理面板启动: http://%s", addr)
 	if err := http.ListenAndServe(addr, mux); err != nil {
-		log.Printf("[Web] 绠＄悊闈㈡澘鍚姩澶辫触: %v", err)
+		log.Printf("[Web] 管理面板启动失败: %v", err)
 	}
 }
 
-// isWebAuthenticated 妫€鏌ュ綋鍓嶈姹傛槸鍚﹀凡鐧诲綍
+// isWebAuthenticated 检查当前请求是否已登录
 func isWebAuthenticated(r *http.Request) bool {
 	if webPassword == "" {
 		return true
@@ -1264,16 +1311,18 @@ func isWebAuthenticated(r *http.Request) bool {
 	return true
 }
 
-// newSessionID 鐢熸垚涓嶅彲棰勬祴鐨?session ID
+// newSessionID 生成不可预测的 session ID
 func newSessionID() string {
 	var b [32]byte
 	if _, err := rand.Read(b[:]); err != nil {
-		// 鏋佸皬姒傜巼闄嶇骇锛氱撼绉?+ pid锛屼絾浠嶅敖閲忎笉鍙娴?		return fmt.Sprintf("%d-%d", time.Now().UnixNano(), os.Getpid())
+		// 极小概率降级：纳秒 + pid，但仍尽量不可预测
+		return fmt.Sprintf("%d-%d", time.Now().UnixNano(), os.Getpid())
 	}
 	return hex.EncodeToString(b[:])
 }
 
-// clearExpiredSessions 瀹氭湡娓呯悊杩囨湡 session锛岄伩鍏嶅唴瀛樻硠婕?func startSessionGC() {
+// clearExpiredSessions 定期清理过期 session，避免内存泄漏
+func startSessionGC() {
 	ticker := time.NewTicker(1 * time.Hour)
 	defer ticker.Stop()
 	for range ticker.C {
@@ -1288,8 +1337,8 @@ func newSessionID() string {
 	}
 }
 
-// authMiddleware 閴存潈涓棿浠讹紙webPassword 涓虹┖鏃惰烦杩囬壌鏉冿級
-// API/WS 鏈櫥褰曡繑鍥?401 JSON锛堥伩鍏嶅墠绔?fetch 鎷垮埌 302 HTML 瑙ｆ瀽澶辫触锛夛紝椤甸潰鎵?302 璺崇櫥褰曢〉
+// authMiddleware 鉴权中间件（webPassword 为空时跳过鉴权）
+// API/WS 未登录返回 401 JSON（避免前端 fetch 拿到 302 HTML 解析失败），页面才 302 跳登录页
 func authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if isWebAuthenticated(r) {
@@ -1297,7 +1346,7 @@ func authMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// 娓呮帀澶辨晥 cookie锛岄伩鍏嶆祻瑙堝櫒涓€鐩村甫鏃犳晥 session
+		// 清掉失效 cookie，避免浏览器一直带无效 session
 		if _, err := r.Cookie("ech_session"); err == nil {
 			http.SetCookie(w, &http.Cookie{
 				Name:     "ech_session",
@@ -1312,22 +1361,23 @@ func authMiddleware(next http.Handler) http.Handler {
 		if strings.HasPrefix(r.URL.Path, "/api/") {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusUnauthorized)
-			json.NewEncoder(w).Encode(map[string]string{"error": "鏈櫥褰?})
+			json.NewEncoder(w).Encode(map[string]string{"error": "未登录"})
 			return
 		}
 		if r.URL.Path == "/ws" {
-			// WebSocket 鎻℃墜涓嶈兘 302锛岀洿鎺?401 璁╁墠绔烦鐧诲綍
+			// WebSocket 握手不能 302，直接 401 让前端跳登录
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusUnauthorized)
-			json.NewEncoder(w).Encode(map[string]string{"error": "鏈櫥褰?})
+			json.NewEncoder(w).Encode(map[string]string{"error": "未登录"})
 			return
 		}
 
-		// 鏈櫥褰曪紝閲嶅畾鍚戝埌鐧诲綍椤?		http.Redirect(w, r, "/login", http.StatusFound)
+		// 未登录，重定向到登录页
+		http.Redirect(w, r, "/login", http.StatusFound)
 	})
 }
 
-// handleLogin 鎻愪緵鐧诲綍椤甸潰
+// handleLogin 提供登录页面
 func handleLogin(w http.ResponseWriter, r *http.Request) {
 	if webPassword == "" {
 		http.Redirect(w, r, "/", http.StatusFound)
@@ -1337,13 +1387,13 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(loginHTML))
 }
 
-// loginHTML 鐧诲綍椤甸潰锛堜笌 index.html 鍚屼竴濂椾富棰樺彉閲忥級
+// loginHTML 登录页面（与 index.html 同一套主题变量）
 var loginHTML = `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>ECH Proxy Control - 鐧诲綍</title>
+<title>ECH Proxy Control - 登录</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Syne:wght@600;700;800&family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
@@ -1396,9 +1446,9 @@ body::after{content:'';position:fixed;inset:0;z-index:0;pointer-events:none;opac
 <div><div class="brand-title">ECH Proxy</div><div class="brand-sub">Control Center</div></div>
 </div>
 <div class="error" id="err"></div>
-<input type="password" id="pw" placeholder="璇疯緭鍏ョ鐞嗗瘑鐮? autofocus autocomplete="current-password">
-<button id="loginBtn" onclick="doLogin()">鐧?褰?/button>
-<div class="hint">Control Center 路 涓庡唴椤靛悓涓€涓婚</div>
+<input type="password" id="pw" placeholder="请输入管理密码" autofocus autocomplete="current-password">
+<button id="loginBtn" onclick="doLogin()">登 录</button>
+<div class="hint">Control Center · 与内页同一主题</div>
 </div>
 </div>
 <script>
@@ -1412,15 +1462,15 @@ btn.disabled=true;
 try{
 const r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:pw})});
 const d=await r.json();
-if(d.status==='ok'){location.href='/'}else{err.textContent=d.error||'瀵嗙爜閿欒';err.style.display='block'}
-}catch(e){err.textContent='缃戠粶閿欒';err.style.display='block'}
+if(d.status==='ok'){location.href='/'}else{err.textContent=d.error||'密码错误';err.style.display='block'}
+}catch(e){err.textContent='网络错误';err.style.display='block'}
 btn.disabled=false;
 }
 </script>
 </body>
 </html>`
 
-// handleAPILogin 澶勭悊鐧诲綍璇锋眰
+// handleAPILogin 处理登录请求
 func handleAPILogin(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	if r.Method != "POST" {
@@ -1431,14 +1481,14 @@ func handleAPILogin(w http.ResponseWriter, r *http.Request) {
 		Password string `json:"password"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		json.NewEncoder(w).Encode(map[string]string{"error": "璇锋眰鏍煎紡閿欒"})
+		json.NewEncoder(w).Encode(map[string]string{"error": "请求格式错误"})
 		return
 	}
 	if req.Password != webPassword {
-		json.NewEncoder(w).Encode(map[string]string{"error": "瀵嗙爜閿欒"})
+		json.NewEncoder(w).Encode(map[string]string{"error": "密码错误"})
 		return
 	}
-	// 鐢熸垚 session锛堜笉鍙娴嬶級
+	// 生成 session（不可预测）
 	sessionID := newSessionID()
 	webSessionsMu.Lock()
 	webSessions[sessionID] = time.Now().Add(7 * 24 * time.Hour)
@@ -1455,7 +1505,8 @@ func handleAPILogin(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
-// handleAPILogout 閫€鍑虹櫥褰曪紙API 杩斿洖 JSON锛屽墠绔啀璺?/login锛?func handleAPILogout(w http.ResponseWriter, r *http.Request) {
+// handleAPILogout 退出登录（API 返回 JSON，前端再跳 /login）
+func handleAPILogout(w http.ResponseWriter, r *http.Request) {
 	if cookie, err := r.Cookie("ech_session"); err == nil {
 		webSessionsMu.Lock()
 		delete(webSessions, cookie.Value)
@@ -1473,7 +1524,7 @@ func handleAPILogin(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
-// handleIndex 鎻愪緵 index.html
+// handleIndex 提供 index.html
 func handleIndex(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/" {
 		http.NotFound(w, r)
@@ -1488,7 +1539,8 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 	w.Write(data)
 }
 
-// handleStatus 鑾峰彇绯荤粺鐘舵€?func handleStatus(w http.ResponseWriter, r *http.Request) {
+// handleStatus 获取系统状态
+func handleStatus(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)
@@ -1511,7 +1563,7 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleConfig 鑾峰彇/鏇存柊閰嶇疆
+// handleConfig 获取/更新配置
 func handleConfig(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
@@ -1533,7 +1585,7 @@ func handleConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// POST: 鏇存柊閰嶇疆
+	// POST: 更新配置
 	var update map[string]string
 	if err := json.NewDecoder(r.Body).Decode(&update); err != nil {
 		http.Error(w, `{"error":"invalid json"}`, 400)
@@ -1552,8 +1604,11 @@ func handleConfig(w http.ResponseWriter, r *http.Request) {
 	if v, ok := update["token"]; ok && v != "" {
 		token = v
 	}
-	// dns_server / ech_domain 涓嶅厑璁歌淇濆瓨鎴愮┖鍊硷細绌哄€间細璁?DoH 璇锋眰鍙樻垚
-	// "https:?dns=..."锛坣o Host in request URL锛夛紝ECH 閰嶇疆浠庢鍒锋柊澶辫触銆?	// 闈㈡澘琛ㄥ崟鍦ㄦ湭鐧诲綍鎴栨湭鍔犺浇瀹屾垚鏃跺瓧娈垫槸绌虹殑锛屼竴鎶婁繚瀛樺氨浼氭妸杩欎袱椤规竻绌?鈥斺€?	// 杩欐槸"淇濆瓨涓€娆′箣鍚庢暣涓唬鐞嗕笉鑳界敤"鐨勭湡瀹炰簨鏁呰矾寰勶紝蹇呴』闃蹭綇銆?	if v, ok := update["dns_server"]; ok && strings.TrimSpace(v) != "" {
+	// dns_server / ech_domain 不允许被保存成空值：空值会让 DoH 请求变成
+	// "https:?dns=..."（no Host in request URL），ECH 配置从此刷新失败。
+	// 面板表单在未登录或未加载完成时字段是空的，一把保存就会把这两项清空 ——
+	// 这是"保存一次之后整个代理不能用"的真实事故路径，必须防住。
+	if v, ok := update["dns_server"]; ok && strings.TrimSpace(v) != "" {
 		dnsServer = strings.TrimSpace(v)
 	}
 	if v, ok := update["ech_domain"]; ok && strings.TrimSpace(v) != "" {
@@ -1561,39 +1616,41 @@ func handleConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	if v, ok := update["proxy_ip"]; ok {
 		proxyIP = v
-		log.Printf("[閰嶇疆] 鍑哄彛 IP 宸叉洿鏂? %s", proxyIP)
+		log.Printf("[配置] 出口 IP 已更新: %s", proxyIP)
 	}
 	if v, ok := update["web_password"]; ok {
 		webPassword = v
-		log.Printf("[閰嶇疆] 闈㈡澘瀵嗙爜宸叉洿鏂?)
+		log.Printf("[配置] 面板密码已更新")
 	}
 	if v, ok := update["routing_mode"]; ok && v != "" {
 		switch v {
 		case "global", "bypass_cn", "none", "custom":
 			routingMode = v
-			log.Printf("[閰嶇疆] 鍒嗘祦妯″紡宸叉洿鏂? %s", routingMode)
+			log.Printf("[配置] 分流模式已更新: %s", routingMode)
 		}
 	}
 	if v, ok := update["web_addr"]; ok && v != "" {
 		webAddr = v
 	}
 
-	// 鍒锋柊 ECH
+	// 刷新 ECH
 	if err := refreshECH(); err != nil {
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
 	}
 
-	// 淇濆瓨閰嶇疆鍒版枃浠?	if err := saveConfig(configFile); err != nil {
-		log.Printf("[閰嶇疆] 淇濆瓨閰嶇疆鏂囦欢澶辫触: %v", err)
+	// 保存配置到文件
+	if err := saveConfig(configFile); err != nil {
+		log.Printf("[配置] 保存配置文件失败: %v", err)
 	} else {
-		log.Printf("[閰嶇疆] 閰嶇疆宸蹭繚瀛樺埌: %s", configFile)
+		log.Printf("[配置] 配置已保存到: %s", configFile)
 	}
 
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
-// handleRules 鑾峰彇/鏇存柊鑷畾涔夎鍒?func handleRules(w http.ResponseWriter, r *http.Request) {
+// handleRules 获取/更新自定义规则
+func handleRules(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
 	if r.Method == "GET" {
@@ -1605,7 +1662,7 @@ func handleConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// POST: 鏇挎崲瑙勫垯
+	// POST: 替换规则
 	var rules []customRule
 	if err := json.NewDecoder(r.Body).Decode(&rules); err != nil {
 		http.Error(w, `{"error":"invalid json"}`, 400)
@@ -1616,22 +1673,23 @@ func handleConfig(w http.ResponseWriter, r *http.Request) {
 	customRules = rules
 	customRulesMu.Unlock()
 
-	// 鎸佷箙鍖栧埌鏂囦欢
+	// 持久化到文件
 	if err := saveCustomRules(rulesData); err != nil {
-		log.Printf("[瑙勫垯] 淇濆瓨瑙勫垯澶辫触: %v", err)
+		log.Printf("[规则] 保存规则失败: %v", err)
 	} else {
-		log.Printf("[瑙勫垯] 宸蹭繚瀛?%d 鏉¤鍒欏埌 %s", len(rules), rulesData)
+		log.Printf("[规则] 已保存 %d 条规则到 %s", len(rules), rulesData)
 	}
 
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
-// handleConnections 鑾峰彇娲昏穬杩炴帴锛堟敮鎸佹悳绱㈠拰鎺掑簭锛?func handleConnections(w http.ResponseWriter, r *http.Request) {
+// handleConnections 获取活跃连接（支持搜索和排序）
+func handleConnections(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
 	conns := getActiveConns()
 
-	// 鎼滅储杩囨护
+	// 搜索过滤
 	search := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("search")))
 	if search != "" {
 		var filtered []connInfoResp
@@ -1647,7 +1705,7 @@ func handleConfig(w http.ResponseWriter, r *http.Request) {
 		conns = filtered
 	}
 
-	// 鎺掑簭
+	// 排序
 	sortBy := r.URL.Query().Get("sort")
 	sortOrder := r.URL.Query().Get("order") // "asc" or "desc", default asc
 	if sortBy != "" {
@@ -1684,7 +1742,7 @@ func handleConfig(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(conns)
 }
 
-// handleTraffic 鑾峰彇娴侀噺缁熻
+// handleTraffic 获取流量统计
 func handleTraffic(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -1695,14 +1753,15 @@ func handleTraffic(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleLogs 鑾峰彇鏃ュ織锛堟寜鏃堕棿姝ｅ簭杩斿洖鏈€杩?100 鏉★紝鍓嶇鐩存帴娓叉煋骞舵粴鍒板簳锛?func handleLogs(w http.ResponseWriter, r *http.Request) {
+// handleLogs 获取日志（按时间正序返回最近 100 条，前端直接渲染并滚到底）
+func handleLogs(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	logBufferMu.Lock()
 	logs := make([]logEntry, len(logBuffer))
 	copy(logs, logBuffer)
 	logBufferMu.Unlock()
 
-	// logBuffer 鏈韩宸叉槸鏃堕棿姝ｅ簭锛屽彧鍙栧熬閮ㄦ渶杩?100 鏉★紝淇濇寔姝ｅ簭
+	// logBuffer 本身已是时间正序，只取尾部最近 100 条，保持正序
 	if len(logs) > 100 {
 		logs = logs[len(logs)-100:]
 	}
@@ -1712,7 +1771,7 @@ func handleTraffic(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(logs)
 }
 
-// handleService 鏈嶅姟鎺у埗
+// handleService 服务控制
 func handleService(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	action := strings.TrimPrefix(r.URL.Path, "/api/service/")
@@ -1723,23 +1782,24 @@ func handleService(w http.ResponseWriter, r *http.Request) {
 			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 			return
 		}
-		json.NewEncoder(w).Encode(map[string]string{"status": "ok", "message": "ECH 閰嶇疆宸插埛鏂?})
+		json.NewEncoder(w).Encode(map[string]string{"status": "ok", "message": "ECH 配置已刷新"})
 	case "reload-rules":
 		if rulesFile == "" {
-			json.NewEncoder(w).Encode(map[string]string{"error": "鏈厤缃鍒欐枃浠?})
+			json.NewEncoder(w).Encode(map[string]string{"error": "未配置规则文件"})
 			return
 		}
 		if err := loadCustomRules(rulesFile); err != nil {
 			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 			return
 		}
-		json.NewEncoder(w).Encode(map[string]string{"status": "ok", "message": "瑙勫垯宸查噸杞?})
+		json.NewEncoder(w).Encode(map[string]string{"status": "ok", "message": "规则已重载"})
 	default:
 		json.NewEncoder(w).Encode(map[string]string{"error": "unknown action"})
 	}
 }
 
-// handleWebSocket WebSocket 瀹炴椂鎺ㄩ€?// ======================== 鍑哄彛IP妫€娴?========================
+// handleWebSocket WebSocket 实时推送
+// ======================== 出口IP检测 ========================
 
 var (
 	cachedExitIP   string
@@ -1760,9 +1820,9 @@ func startExitInfoDetector() {
 }
 
 func detectExitInfo() {
-	log.Printf("[妫€娴媇 === 寮€濮嬫娴嬪嚭鍙P ===")
+	log.Printf("[检测] === 开始检测出口IP ===")
 
-	// 閫氳繃鏈湴 HTTP 浠ｇ悊妫€娴嬪嚭鍙?IP锛堥伩鍏?Worker 涓嶆敮鎸?80 绔彛鐨勯棶棰橈級
+	// 通过本地 HTTP 代理检测出口 IP（避免 Worker 不支持 80 端口的问题）
 	localProxy := "http://127.0.0.1" + listenAddr[strings.Index(listenAddr, ":"):]
 	proxyURL, _ := url.Parse(localProxy)
 
@@ -1773,11 +1833,11 @@ func detectExitInfo() {
 		},
 	}
 
-	// 妫€娴嬪嚭鍙?IP
+	// 检测出口 IP
 	exitIP := ""
 	resp, err := client.Get("https://api.ipify.org?format=json")
 	if err != nil {
-		log.Printf("[妫€娴媇 鑾峰彇鍑哄彛IP澶辫触: %v", err)
+		log.Printf("[检测] 获取出口IP失败: %v", err)
 	} else {
 		defer resp.Body.Close()
 		body, _ := io.ReadAll(resp.Body)
@@ -1787,7 +1847,8 @@ func detectExitInfo() {
 		}
 	}
 
-	// 妫€娴?COLO锛堥€氳繃 Cloudflare trace锛?	colo := ""
+	// 检测 COLO（通过 Cloudflare trace）
+	colo := ""
 	resp2, err := client.Get("https://1.1.1.1/cdn-cgi/trace")
 	if err == nil {
 		defer resp2.Body.Close()
@@ -1809,11 +1870,12 @@ func detectExitInfo() {
 	exitInfoMu.Unlock()
 
 	if exitIP != "" {
-		log.Printf("[妫€娴媇 鍑哄彛IP: %s, COLO: %s", exitIP, colo)
+		log.Printf("[检测] 出口IP: %s, COLO: %s", exitIP, colo)
 	}
 }
 
-// handleExitInfo 杩斿洖缂撳瓨鐨勫嚭鍙ｄ俊鎭?func handleExitInfo(w http.ResponseWriter, r *http.Request) {
+// handleExitInfo 返回缓存的出口信息
+func handleExitInfo(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	exitInfoMu.RLock()
 	defer exitInfoMu.RUnlock()
@@ -1826,7 +1888,7 @@ func detectExitInfo() {
 func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Printf("[Web] WebSocket 鍗囩骇澶辫触: %v", err)
+		log.Printf("[Web] WebSocket 升级失败: %v", err)
 		return
 	}
 	defer conn.Close()
@@ -1834,14 +1896,16 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 
-	// 鐢ㄤ簬璁＄畻瀹炴椂閫熷害锛堝崟浣?B/s锛?	var prevUp, prevDn int64
+	// 用于计算实时速度（单位 B/s）
+	var prevUp, prevDn int64
 	var prevTime time.Time
 	firstTick := true
 
 	for {
 		select {
 		case <-ticker.C:
-			// 璁＄畻瀹炴椂娴侀噺锛堟椿璺冭繛鎺ョ殑娴侀噺涔嬪拰锛?			var rtUp, rtDn int64
+			// 计算实时流量（活跃连接的流量之和）
+			var rtUp, rtDn int64
 			activeConns.Range(func(key, value interface{}) bool {
 				info := value.(*connInfo)
 				rtUp += info.upload.Load()
@@ -1849,7 +1913,7 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 				return true
 			})
 
-			// 璁＄畻澧為噺閫熷害锛堟€讳笂浼?涓嬭浇 - 涓婃鍊硷級/ 瀹為檯闂撮殧绉掓暟
+			// 计算增量速度（总上传/下载 - 上次值）/ 实际间隔秒数
 			curUp := totalUpload.Load() + rtUp
 			curDn := totalDownload.Load() + rtDn
 			now := time.Now()
@@ -1893,11 +1957,11 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// ======================== ECH 鏀寔 ========================
+// ======================== ECH 支持 ========================
 
 const typeHTTPS = 65
 
-// 鍏ㄥ眬 HTTP 瀹㈡埛绔紝澶嶇敤 TCP 杩炴帴
+// 全局 HTTP 客户端，复用 TCP 连接
 var dohHTTPClient = &http.Client{
 	Timeout: 10 * time.Second,
 	Transport: &http.Transport{
@@ -1909,32 +1973,32 @@ var dohHTTPClient = &http.Client{
 }
 
 func prepareECH() error {
-	// 濡傛灉閰嶇疆浜嗙幆澧冧唬鐞嗭紝璺宠繃 ECH锛堜唬鐞嗙幆澧冧笅 ECH 鍙兘涓嶅吋瀹癸級
+	// 如果配置了环境代理，跳过 ECH（代理环境下 ECH 可能不兼容）
 	if hasEnvProxy() {
-		log.Printf("[ECH] 妫€娴嬪埌鐜浠ｇ悊锛岃烦杩?ECH 閰嶇疆鑾峰彇")
+		log.Printf("[ECH] 检测到环境代理，跳过 ECH 配置获取")
 		return nil
 	}
 
 	echBase64, err := queryHTTPSRecord(echDomain, dnsServer)
 	if err != nil {
-		return fmt.Errorf("DNS 鏌ヨ澶辫触: %w", err)
+		return fmt.Errorf("DNS 查询失败: %w", err)
 	}
 	if echBase64 == "" {
-		return errors.New("鏈壘鍒?ECH 鍙傛暟")
+		return errors.New("未找到 ECH 参数")
 	}
 	raw, err := base64.StdEncoding.DecodeString(echBase64)
 	if err != nil {
-		return fmt.Errorf("ECH 瑙ｇ爜澶辫触: %w", err)
+		return fmt.Errorf("ECH 解码失败: %w", err)
 	}
 	echListMu.Lock()
 	echList = raw
 	echListMu.Unlock()
-	log.Printf("[ECH] 閰嶇疆宸插姞杞斤紝闀垮害: %d 瀛楄妭", len(raw))
+	log.Printf("[ECH] 配置已加载，长度: %d 字节", len(raw))
 	return nil
 }
 
 func refreshECH() error {
-	log.Printf("[ECH] 鍒锋柊閰嶇疆...")
+	log.Printf("[ECH] 刷新配置...")
 	return prepareECH()
 }
 
@@ -1942,7 +2006,7 @@ func getECHList() ([]byte, error) {
 	echListMu.RLock()
 	defer echListMu.RUnlock()
 	if len(echList) == 0 {
-		return nil, errors.New("ECH 閰嶇疆鏈姞杞?)
+		return nil, errors.New("ECH 配置未加载")
 	}
 	return echList, nil
 }
@@ -1950,11 +2014,11 @@ func getECHList() ([]byte, error) {
 func buildTLSConfigWithECH(serverName string, echList []byte) (*tls.Config, error) {
 	roots, err := x509.SystemCertPool()
 	if err != nil {
-		return nil, fmt.Errorf("鍔犺浇绯荤粺鏍硅瘉涔﹀け璐? %w", err)
+		return nil, fmt.Errorf("加载系统根证书失败: %w", err)
 	}
 
 	if echList == nil || len(echList) == 0 {
-		return nil, errors.New("ECH 閰嶇疆涓虹┖锛岃繖鏄繀闇€鍔熻兘")
+		return nil, errors.New("ECH 配置为空，这是必需功能")
 	}
 
 	config := &tls.Config{
@@ -1963,35 +2027,39 @@ func buildTLSConfigWithECH(serverName string, echList []byte) (*tls.Config, erro
 		RootCAs:    roots,
 	}
 
-	// 浣跨敤鍙嶅皠璁剧疆 ECH 瀛楁锛圗CH 鏄牳蹇冨姛鑳斤紝蹇呴』璁剧疆鎴愬姛锛?	if err := setECHConfig(config, echList); err != nil {
-		return nil, fmt.Errorf("璁剧疆 ECH 閰嶇疆澶辫触锛堥渶瑕?Go 1.23+ 鎴栨敮鎸?ECH 鐨勭増鏈級: %w", err)
+	// 使用反射设置 ECH 字段（ECH 是核心功能，必须设置成功）
+	if err := setECHConfig(config, echList); err != nil {
+		return nil, fmt.Errorf("设置 ECH 配置失败（需要 Go 1.23+ 或支持 ECH 的版本）: %w", err)
 	}
 
 	return config, nil
 }
 
-// setECHConfig 浣跨敤鍙嶅皠璁剧疆 ECH 閰嶇疆锛圗CH 鏄牳蹇冨姛鑳斤紝蹇呴』鎴愬姛锛?func setECHConfig(config *tls.Config, echList []byte) error {
+// setECHConfig 使用反射设置 ECH 配置（ECH 是核心功能，必须成功）
+func setECHConfig(config *tls.Config, echList []byte) error {
 	configValue := reflect.ValueOf(config).Elem()
 
-	// 璁剧疆 EncryptedClientHelloConfigList锛堝繀闇€锛?	field1 := configValue.FieldByName("EncryptedClientHelloConfigList")
+	// 设置 EncryptedClientHelloConfigList（必需）
+	field1 := configValue.FieldByName("EncryptedClientHelloConfigList")
 	if !field1.IsValid() || !field1.CanSet() {
-		return fmt.Errorf("EncryptedClientHelloConfigList 瀛楁涓嶅彲鐢紝闇€瑕?Go 1.23+ 鐗堟湰")
+		return fmt.Errorf("EncryptedClientHelloConfigList 字段不可用，需要 Go 1.23+ 版本")
 	}
 	field1.Set(reflect.ValueOf(echList))
 
-	// 璁剧疆 EncryptedClientHelloRejectionVerify锛堝繀闇€锛?	field2 := configValue.FieldByName("EncryptedClientHelloRejectionVerify")
+	// 设置 EncryptedClientHelloRejectionVerify（必需）
+	field2 := configValue.FieldByName("EncryptedClientHelloRejectionVerify")
 	if !field2.IsValid() || !field2.CanSet() {
-		return fmt.Errorf("EncryptedClientHelloRejectionVerify 瀛楁涓嶅彲鐢紝闇€瑕?Go 1.23+ 鐗堟湰")
+		return fmt.Errorf("EncryptedClientHelloRejectionVerify 字段不可用，需要 Go 1.23+ 版本")
 	}
 	rejectionFunc := func(cs tls.ConnectionState) error {
-		return errors.New("鏈嶅姟鍣ㄦ嫆缁?ECH")
+		return errors.New("服务器拒绝 ECH")
 	}
 	field2.Set(reflect.ValueOf(rejectionFunc))
 
 	return nil
 }
 
-// queryHTTPSRecord 閫氳繃 DoH 鏌ヨ HTTPS 璁板綍
+// queryHTTPSRecord 通过 DoH 查询 HTTPS 记录
 func queryHTTPSRecord(domain, dnsServer string) (string, error) {
 	dohURL := dnsServer
 	if !strings.HasPrefix(dohURL, "https://") && !strings.HasPrefix(dohURL, "http://") {
@@ -2000,10 +2068,11 @@ func queryHTTPSRecord(domain, dnsServer string) (string, error) {
 	return queryDoH(domain, dohURL)
 }
 
-// queryDoH 鎵ц DoH 鏌ヨ锛堢敤浜庤幏鍙?ECH 閰嶇疆锛?func queryDoH(domain, dohURL string) (string, error) {
+// queryDoH 执行 DoH 查询（用于获取 ECH 配置）
+func queryDoH(domain, dohURL string) (string, error) {
 	u, err := url.Parse(dohURL)
 	if err != nil {
-		return "", fmt.Errorf("鏃犳晥鐨?DoH URL: %v", err)
+		return "", fmt.Errorf("无效的 DoH URL: %v", err)
 	}
 
 	dnsQuery := buildDNSQuery(domain, typeHTTPS)
@@ -2015,24 +2084,24 @@ func queryHTTPSRecord(domain, dnsServer string) (string, error) {
 
 	req, err := http.NewRequest("GET", u.String(), nil)
 	if err != nil {
-		return "", fmt.Errorf("鍒涘缓璇锋眰澶辫触: %v", err)
+		return "", fmt.Errorf("创建请求失败: %v", err)
 	}
 	req.Header.Set("Accept", "application/dns-message")
 	req.Header.Set("Content-Type", "application/dns-message")
 
 	resp, err := dohHTTPClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("DoH 璇锋眰澶辫触: %v", err)
+		return "", fmt.Errorf("DoH 请求失败: %v", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("DoH 鏈嶅姟鍣ㄨ繑鍥為敊璇? %d", resp.StatusCode)
+		return "", fmt.Errorf("DoH 服务器返回错误: %d", resp.StatusCode)
 	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", fmt.Errorf("璇诲彇 DoH 鍝嶅簲澶辫触: %v", err)
+		return "", fmt.Errorf("读取 DoH 响应失败: %v", err)
 	}
 
 	return parseDNSResponse(body)
@@ -2051,11 +2120,11 @@ func buildDNSQuery(domain string, qtype uint16) []byte {
 
 func parseDNSResponse(response []byte) (string, error) {
 	if len(response) < 12 {
-		return "", errors.New("鍝嶅簲杩囩煭")
+		return "", errors.New("响应过短")
 	}
 	ancount := binary.BigEndian.Uint16(response[6:8])
 	if ancount == 0 {
-		return "", errors.New("鏃犲簲绛旇褰?)
+		return "", errors.New("无应答记录")
 	}
 
 	offset := 12
@@ -2127,33 +2196,34 @@ func parseHTTPSRecord(data []byte) string {
 	return ""
 }
 
-// ======================== DoH 浠ｇ悊鏀寔 ========================
+// ======================== DoH 代理支持 ========================
 
-// queryDoHForProxy 閫氳繃 ECH 杞彂 DNS 鏌ヨ鍒?Cloudflare DoH
+// queryDoHForProxy 通过 ECH 转发 DNS 查询到 Cloudflare DoH
 func queryDoHForProxy(dnsQuery []byte) ([]byte, error) {
 	_, port, _, err := parseServerAddr(serverAddr)
 	if err != nil {
 		return nil, err
 	}
 
-	// 鏋勫缓 DoH URL
+	// 构建 DoH URL
 	dohURL := fmt.Sprintf("https://cloudflare-dns.com:%s/dns-query", port)
 
 	echBytes, err := getECHList()
 	if err != nil {
-		return nil, fmt.Errorf("鑾峰彇 ECH 閰嶇疆澶辫触: %w", err)
+		return nil, fmt.Errorf("获取 ECH 配置失败: %w", err)
 	}
 
 	tlsCfg, err := buildTLSConfigWithECH("cloudflare-dns.com", echBytes)
 	if err != nil {
-		return nil, fmt.Errorf("鏋勫缓 TLS 閰嶇疆澶辫触: %w", err)
+		return nil, fmt.Errorf("构建 TLS 配置失败: %w", err)
 	}
 
-	// 鍒涘缓 HTTP 瀹㈡埛绔?	transport := &http.Transport{
+	// 创建 HTTP 客户端
+	transport := &http.Transport{
 		TLSClientConfig: tlsCfg,
 	}
 
-	// 濡傛灉鎸囧畾浜?IP锛屼娇鐢ㄨ嚜瀹氫箟 Dialer
+	// 如果指定了 IP，使用自定义 Dialer
 	if serverIP != "" {
 		transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
 			_, port, err := net.SplitHostPort(addr)
@@ -2172,7 +2242,7 @@ func queryDoHForProxy(dnsQuery []byte) ([]byte, error) {
 		Timeout:   10 * time.Second,
 	}
 
-	// 鍙戦€?DoH 璇锋眰
+	// 发送 DoH 请求
 	req, err := http.NewRequest("POST", dohURL, bytes.NewReader(dnsQuery))
 	if err != nil {
 		return nil, err
@@ -2183,35 +2253,35 @@ func queryDoHForProxy(dnsQuery []byte) ([]byte, error) {
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("DoH 璇锋眰澶辫触: %w", err)
+		return nil, fmt.Errorf("DoH 请求失败: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("DoH 鍝嶅簲閿欒: %d", resp.StatusCode)
+		return nil, fmt.Errorf("DoH 响应错误: %d", resp.StatusCode)
 	}
 
 	return io.ReadAll(resp.Body)
 }
 
-// ======================== WebSocket 瀹㈡埛绔?========================
+// ======================== WebSocket 客户端 ========================
 
-// getEffectiveServerAddr 鑾峰彇甯?ProxyIP 鐨勬湁鏁堟湇鍔″櫒鍦板潃
+// getEffectiveServerAddr 获取带 ProxyIP 的有效服务器地址
 func getEffectiveServerAddr() string {
 	if proxyIP == "" {
 		return serverAddr
 	}
-	// 鍒嗙 host:port 鍜?path
+	// 分离 host:port 和 path
 	host, port, path, err := parseServerAddr(serverAddr)
 	if err != nil {
 		return serverAddr
 	}
-	// 纭繚 proxyIP 鍖呭惈绔彛
+	// 确保 proxyIP 包含端口
 	proxyHost := proxyIP
 	if !strings.Contains(proxyIP, ":") {
 		proxyHost = proxyIP + ":443"
 	}
-	// 鏋勫缓鏂?path
+	// 构建新 path
 	if path == "" || path == "/" {
 		path = "/?ip=" + proxyHost
 	} else {
@@ -2234,13 +2304,13 @@ func parseServerAddr(addr string) (host, port, path string, err error) {
 
 	host, port, err = net.SplitHostPort(addr)
 	if err != nil {
-		return "", "", "", fmt.Errorf("鏃犳晥鐨勬湇鍔″櫒鍦板潃鏍煎紡: %v", err)
+		return "", "", "", fmt.Errorf("无效的服务器地址格式: %v", err)
 	}
 
 	return host, port, path, nil
 }
 
-// hasEnvProxy 妫€娴嬫槸鍚﹂厤缃簡鐜浠ｇ悊
+// hasEnvProxy 检测是否配置了环境代理
 func hasEnvProxy() bool {
 	for _, key := range []string{"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"} {
 		if v := os.Getenv(key); v != "" {
@@ -2264,13 +2334,13 @@ func dialWebSocketWithECH(maxRetries int) (*websocket.Conn, error) {
 		var tlsCfg *tls.Config
 
 		if useProxy {
-			// 閫氳繃鐜浠ｇ悊杩炴帴鏃惰烦杩?ECH锛圗CH 鍦ㄤ唬鐞嗛毀閬撲腑鍙兘涓嶅吋瀹癸級
+			// 通过环境代理连接时跳过 ECH（ECH 在代理隧道中可能不兼容）
 			tlsCfg = &tls.Config{
 				ServerName: host,
 				MinVersion: tls.VersionTLS13,
 			}
 			if attempt == 1 {
-				log.Printf("[浠ｇ悊] 妫€娴嬪埌鐜浠ｇ悊锛岃烦杩?ECH 鐩存帴杩炴帴")
+				log.Printf("[代理] 检测到环境代理，跳过 ECH 直接连接")
 			}
 		} else {
 			echBytes, echErr := getECHList()
@@ -2300,7 +2370,7 @@ func dialWebSocketWithECH(maxRetries int) (*websocket.Conn, error) {
 			Proxy:            http.ProxyFromEnvironment,
 		}
 
-		// 鍙湁鍦ㄦ病鏈夐厤缃幆澧冧唬鐞嗘椂鎵嶄娇鐢ㄨ嚜瀹氫箟鎷ㄥ彿杩炴帴鍥哄畾 IP
+		// 只有在没有配置环境代理时才使用自定义拨号连接固定 IP
 		if serverIP != "" && !useProxy {
 			dialer.NetDial = func(network, address string) (net.Conn, error) {
 				_, port, err := net.SplitHostPort(address)
@@ -2314,7 +2384,7 @@ func dialWebSocketWithECH(maxRetries int) (*websocket.Conn, error) {
 		wsConn, _, dialErr := dialer.Dial(wsURL, nil)
 		if dialErr != nil {
 			if !useProxy && strings.Contains(dialErr.Error(), "ECH") && attempt < maxRetries {
-				log.Printf("[ECH] 杩炴帴澶辫触锛屽皾璇曞埛鏂伴厤缃?(%d/%d)", attempt, maxRetries)
+				log.Printf("[ECH] 连接失败，尝试刷新配置 (%d/%d)", attempt, maxRetries)
 				refreshECH()
 				time.Sleep(time.Second)
 				continue
@@ -2325,34 +2395,34 @@ func dialWebSocketWithECH(maxRetries int) (*websocket.Conn, error) {
 		return wsConn, nil
 	}
 
-	return nil, errors.New("杩炴帴澶辫触锛屽凡杈炬渶澶ч噸璇曟鏁?)
+	return nil, errors.New("连接失败，已达最大重试次数")
 }
 
-// ======================== 缁熶竴浠ｇ悊鏈嶅姟鍣?========================
+// ======================== 统一代理服务器 ========================
 
 func runProxyServer(addr string) {
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
-		log.Fatalf("[浠ｇ悊] 鐩戝惉澶辫触: %v", err)
+		log.Fatalf("[代理] 监听失败: %v", err)
 	}
 	defer listener.Close()
 
-	log.Printf("[浠ｇ悊] 鏈嶅姟鍣ㄥ惎鍔? %s (鏀寔 SOCKS5 鍜?HTTP)", addr)
-	log.Printf("[浠ｇ悊] 鍚庣鏈嶅姟鍣? %s", serverAddr)
+	log.Printf("[代理] 服务器启动: %s (支持 SOCKS5 和 HTTP)", addr)
+	log.Printf("[代理] 后端服务器: %s", serverAddr)
 	if downLimitMbps > 0 {
-		log.Printf("[浠ｇ悊] 鍗曡繛鎺ヤ笅琛岄檺閫? %.1f Mbps", downLimitMbps)
+		log.Printf("[代理] 单连接下行限速: %.1f Mbps", downLimitMbps)
 	}
 	if idleTimeout > 0 {
-		log.Printf("[浠ｇ悊] 闅ч亾绌洪棽瓒呮椂: %s", idleTimeout)
+		log.Printf("[代理] 隧道空闲超时: %s", idleTimeout)
 	}
 	if serverIP != "" {
-		log.Printf("[浠ｇ悊] 浣跨敤鍥哄畾 IP: %s", serverIP)
+		log.Printf("[代理] 使用固定 IP: %s", serverIP)
 	}
 
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
-			log.Printf("[浠ｇ悊] 鎺ュ彈杩炴帴澶辫触: %v", err)
+			log.Printf("[代理] 接受连接失败: %v", err)
 			continue
 		}
 
@@ -2365,7 +2435,8 @@ func handleConnection(conn net.Conn) {
 
 	clientAddr := conn.RemoteAddr().String()
 
-	// 鍚敤 TCP_NODELAY 闄嶄綆寤惰繜锛屽瑙嗛娴佺瓑浜や簰寮忔祦閲忛噸瑕?	if tcpConn, ok := conn.(*net.TCPConn); ok {
+	// 启用 TCP_NODELAY 降低延迟，对视频流等交互式流量重要
+	if tcpConn, ok := conn.(*net.TCPConn); ok {
 		tcpConn.SetNoDelay(true)
 		tcpConn.SetReadBuffer(256 * 1024)
 		tcpConn.SetWriteBuffer(256 * 1024)
@@ -2373,7 +2444,8 @@ func handleConnection(conn net.Conn) {
 
 	conn.SetDeadline(time.Now().Add(30 * time.Second))
 
-	// 璇诲彇绗竴涓瓧鑺傚垽鏂崗璁?	buf := make([]byte, 1)
+	// 读取第一个字节判断协议
+	buf := make([]byte, 1)
 	n, err := conn.Read(buf)
 	if err != nil || n == 0 {
 		return
@@ -2381,29 +2453,29 @@ func handleConnection(conn net.Conn) {
 
 	firstByte := buf[0]
 
-	// 浣跨敤 switch 鍒ゆ柇鍗忚绫诲瀷
+	// 使用 switch 判断协议类型
 	switch firstByte {
 	case 0x05:
-		// SOCKS5 鍗忚
+		// SOCKS5 协议
 		handleSOCKS5(conn, clientAddr, firstByte)
 	case 'C', 'G', 'P', 'H', 'D', 'O', 'T':
-		// HTTP 鍗忚 (CONNECT, GET, POST, HEAD, DELETE, OPTIONS, TRACE, PUT, PATCH)
+		// HTTP 协议 (CONNECT, GET, POST, HEAD, DELETE, OPTIONS, TRACE, PUT, PATCH)
 		handleHTTP(conn, clientAddr, firstByte)
 	default:
-		log.Printf("[浠ｇ悊] %s 鏈煡鍗忚: 0x%02x", clientAddr, firstByte)
+		log.Printf("[代理] %s 未知协议: 0x%02x", clientAddr, firstByte)
 	}
 }
 
-// ======================== SOCKS5 澶勭悊 ========================
+// ======================== SOCKS5 处理 ========================
 
 func handleSOCKS5(conn net.Conn, clientAddr string, firstByte byte) {
-	// 楠岃瘉鐗堟湰
+	// 验证版本
 	if firstByte != 0x05 {
-		log.Printf("[SOCKS5] %s 鐗堟湰閿欒: 0x%02x", clientAddr, firstByte)
+		log.Printf("[SOCKS5] %s 版本错误: 0x%02x", clientAddr, firstByte)
 		return
 	}
 
-	// 璇诲彇璁よ瘉鏂规硶鏁伴噺
+	// 读取认证方法数量
 	buf := make([]byte, 1)
 	if _, err := io.ReadFull(conn, buf); err != nil {
 		return
@@ -2415,12 +2487,12 @@ func handleSOCKS5(conn net.Conn, clientAddr string, firstByte byte) {
 		return
 	}
 
-	// 鍝嶅簲鏃犻渶璁よ瘉
+	// 响应无需认证
 	if _, err := conn.Write([]byte{0x05, 0x00}); err != nil {
 		return
 	}
 
-	// 璇诲彇璇锋眰
+	// 读取请求
 	buf = make([]byte, 4)
 	if _, err := io.ReadFull(conn, buf); err != nil {
 		return
@@ -2442,7 +2514,7 @@ func handleSOCKS5(conn net.Conn, clientAddr string, firstByte byte) {
 		}
 		host = net.IP(buf).String()
 
-	case 0x03: // 鍩熷悕
+	case 0x03: // 域名
 		buf = make([]byte, 1)
 		if _, err := io.ReadFull(conn, buf); err != nil {
 			return
@@ -2465,7 +2537,7 @@ func handleSOCKS5(conn net.Conn, clientAddr string, firstByte byte) {
 		return
 	}
 
-	// 璇诲彇绔彛
+	// 读取端口
 	buf = make([]byte, 2)
 	if _, err := io.ReadFull(conn, buf); err != nil {
 		return
@@ -2485,7 +2557,7 @@ func handleSOCKS5(conn net.Conn, clientAddr string, firstByte byte) {
 
 		if err := handleTunnel(conn, target, clientAddr, modeSOCKS5, ""); err != nil {
 			if !isNormalCloseError(err) {
-				log.Printf("[SOCKS5] %s 浠ｇ悊澶辫触: %v", clientAddr, err)
+				log.Printf("[SOCKS5] %s 代理失败: %v", clientAddr, err)
 			}
 		}
 
@@ -2499,26 +2571,29 @@ func handleSOCKS5(conn net.Conn, clientAddr string, firstByte byte) {
 }
 
 func handleUDPAssociate(tcpConn net.Conn, clientAddr string) {
-	// 鍒涘缓 UDP 鐩戝惉鍣?	udpAddr, err := net.ResolveUDPAddr("udp", "127.0.0.1:0")
+	// 创建 UDP 监听器
+	udpAddr, err := net.ResolveUDPAddr("udp", "127.0.0.1:0")
 	if err != nil {
-		log.Printf("[UDP] %s 瑙ｆ瀽鍦板潃澶辫触: %v", clientAddr, err)
+		log.Printf("[UDP] %s 解析地址失败: %v", clientAddr, err)
 		tcpConn.Write([]byte{0x05, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00})
 		return
 	}
 
 	udpConn, err := net.ListenUDP("udp", udpAddr)
 	if err != nil {
-		log.Printf("[UDP] %s 鐩戝惉澶辫触: %v", clientAddr, err)
+		log.Printf("[UDP] %s 监听失败: %v", clientAddr, err)
 		tcpConn.Write([]byte{0x05, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00})
 		return
 	}
 
-	// 鑾峰彇瀹為檯鐩戝惉鐨勭鍙?	localAddr := udpConn.LocalAddr().(*net.UDPAddr)
+	// 获取实际监听的端口
+	localAddr := udpConn.LocalAddr().(*net.UDPAddr)
 	port := localAddr.Port
 
-	log.Printf("[UDP] %s UDP ASSOCIATE 鐩戝惉绔彛: %d", clientAddr, port)
+	log.Printf("[UDP] %s UDP ASSOCIATE 监听端口: %d", clientAddr, port)
 
-	// 鍙戦€佹垚鍔熷搷搴?	response := []byte{0x05, 0x00, 0x00, 0x01}
+	// 发送成功响应
+	response := []byte{0x05, 0x00, 0x00, 0x01}
 	response = append(response, 127, 0, 0, 1) // 127.0.0.1
 	response = append(response, byte(port>>8), byte(port&0xff))
 
@@ -2527,17 +2602,17 @@ func handleUDPAssociate(tcpConn net.Conn, clientAddr string) {
 		return
 	}
 
-	// 鍚姩 UDP 澶勭悊
+	// 启动 UDP 处理
 	stopChan := make(chan struct{})
 	go handleUDPRelay(udpConn, clientAddr, stopChan)
 
-	// 淇濇寔 TCP 杩炴帴锛岀洿鍒板鎴风鍏抽棴
+	// 保持 TCP 连接，直到客户端关闭
 	buf := make([]byte, 1)
 	tcpConn.Read(buf)
 
 	close(stopChan)
 	udpConn.Close()
-	log.Printf("[UDP] %s UDP ASSOCIATE 杩炴帴鍏抽棴", clientAddr)
+	log.Printf("[UDP] %s UDP ASSOCIATE 连接关闭", clientAddr)
 }
 
 func handleUDPRelay(udpConn *net.UDPConn, clientAddr string, stopChan chan struct{}) {
@@ -2558,11 +2633,12 @@ func handleUDPRelay(udpConn *net.UDPConn, clientAddr string, stopChan chan struc
 			return
 		}
 
-		// 瑙ｆ瀽 SOCKS5 UDP 璇锋眰澶?		if n < 10 {
+		// 解析 SOCKS5 UDP 请求头
+		if n < 10 {
 			continue
 		}
 
-		// SOCKS5 UDP 璇锋眰鏍煎紡:
+		// SOCKS5 UDP 请求格式:
 		// +----+------+------+----------+----------+----------+
 		// |RSV | FRAG | ATYP | DST.ADDR | DST.PORT |   DATA   |
 		// +----+------+------+----------+----------+----------+
@@ -2571,7 +2647,7 @@ func handleUDPRelay(udpConn *net.UDPConn, clientAddr string, stopChan chan struc
 
 		data := buf[:n]
 
-		if data[2] != 0x00 { // FRAG 蹇呴』涓?0
+		if data[2] != 0x00 { // FRAG 必须为 0
 			continue
 		}
 
@@ -2589,7 +2665,7 @@ func handleUDPRelay(udpConn *net.UDPConn, clientAddr string, stopChan chan struc
 			dstPort = int(data[8])<<8 | int(data[9])
 			headerLen = 10
 
-		case 0x03: // 鍩熷悕
+		case 0x03: // 域名
 			if n < 5 {
 				continue
 			}
@@ -2616,47 +2692,51 @@ func handleUDPRelay(udpConn *net.UDPConn, clientAddr string, stopChan chan struc
 		udpData := data[headerLen:]
 		target := fmt.Sprintf("%s:%d", dstHost, dstPort)
 
-		// 妫€鏌ユ槸鍚︽槸 DNS 鏌ヨ锛堢鍙?53锛?		if dstPort == 53 {
-			log.Printf("[UDP-DNS] %s -> %s (DoH 鏌ヨ)", clientAddr, target)
+		// 检查是否是 DNS 查询（端口 53）
+		if dstPort == 53 {
+			log.Printf("[UDP-DNS] %s -> %s (DoH 查询)", clientAddr, target)
 			go handleDNSQuery(udpConn, addr, udpData, data[:headerLen])
 		} else {
-			log.Printf("[UDP] %s -> %s (鏆備笉鏀寔闈?DNS UDP)", clientAddr, target)
-			// 杩欓噷鍙互鎵╁睍鏀寔鍏朵粬 UDP 娴侀噺
+			log.Printf("[UDP] %s -> %s (暂不支持非 DNS UDP)", clientAddr, target)
+			// 这里可以扩展支持其他 UDP 流量
 		}
 	}
 }
 
 func handleDNSQuery(udpConn *net.UDPConn, clientAddr *net.UDPAddr, dnsQuery []byte, socks5Header []byte) {
-	// 閫氳繃 DoH 鏌ヨ锛堜娇鐢ㄩ噸鍛藉悕鍚庣殑鍑芥暟锛?	dnsResponse, err := queryDoHForProxy(dnsQuery)
+	// 通过 DoH 查询（使用重命名后的函数）
+	dnsResponse, err := queryDoHForProxy(dnsQuery)
 	if err != nil {
-		log.Printf("[UDP-DNS] DoH 鏌ヨ澶辫触: %v", err)
+		log.Printf("[UDP-DNS] DoH 查询失败: %v", err)
 		return
 	}
 
-	// 鏋勫缓 SOCKS5 UDP 鍝嶅簲
+	// 构建 SOCKS5 UDP 响应
 	response := make([]byte, 0, len(socks5Header)+len(dnsResponse))
 	response = append(response, socks5Header...)
 	response = append(response, dnsResponse...)
 
-	// 鍙戦€佸搷搴?	_, err = udpConn.WriteToUDP(response, clientAddr)
+	// 发送响应
+	_, err = udpConn.WriteToUDP(response, clientAddr)
 	if err != nil {
-		log.Printf("[UDP-DNS] 鍙戦€佸搷搴斿け璐? %v", err)
+		log.Printf("[UDP-DNS] 发送响应失败: %v", err)
 		return
 	}
 
-	log.Printf("[UDP-DNS] DoH 鏌ヨ鎴愬姛锛屽搷搴?%d 瀛楄妭", len(dnsResponse))
+	log.Printf("[UDP-DNS] DoH 查询成功，响应 %d 字节", len(dnsResponse))
 }
 
-// ======================== HTTP 澶勭悊 ========================
+// ======================== HTTP 处理 ========================
 
 func handleHTTP(conn net.Conn, clientAddr string, firstByte byte) {
-	// 灏嗙涓€涓瓧鑺傛斁鍥炵紦鍐插尯
+	// 将第一个字节放回缓冲区
 	reader := bufio.NewReader(io.MultiReader(
 		strings.NewReader(string(firstByte)),
 		conn,
 	))
 
-	// 璇诲彇 HTTP 璇锋眰琛?	requestLine, err := reader.ReadString('\n')
+	// 读取 HTTP 请求行
+	requestLine, err := reader.ReadString('\n')
 	if err != nil {
 		return
 	}
@@ -2670,7 +2750,7 @@ func handleHTTP(conn net.Conn, clientAddr string, firstByte byte) {
 	requestURL := parts[1]
 	httpVersion := parts[2]
 
-	// 璇诲彇鎵€鏈?headers
+	// 读取所有 headers
 	headers := make(map[string]string)
 	var headerLines []string
 	for {
@@ -2692,23 +2772,23 @@ func handleHTTP(conn net.Conn, clientAddr string, firstByte byte) {
 
 	switch method {
 	case "CONNECT":
-		// HTTPS 闅ч亾浠ｇ悊 - 闇€瑕佸彂閫?200 鍝嶅簲
+		// HTTPS 隧道代理 - 需要发送 200 响应
 		log.Printf("[HTTP-CONNECT] %s -> %s", clientAddr, requestURL)
 		if err := handleTunnel(conn, requestURL, clientAddr, modeHTTPConnect, ""); err != nil {
 			if !isNormalCloseError(err) {
-				log.Printf("[HTTP-CONNECT] %s 浠ｇ悊澶辫触: %v", clientAddr, err)
+				log.Printf("[HTTP-CONNECT] %s 代理失败: %v", clientAddr, err)
 			}
 		}
 
 	case "GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS", "PATCH", "TRACE":
-		// HTTP 浠ｇ悊 - 鐩存帴杞彂锛屼笉鍙戦€?200 鍝嶅簲
+		// HTTP 代理 - 直接转发，不发送 200 响应
 		log.Printf("[HTTP-%s] %s -> %s", method, clientAddr, requestURL)
 
 		var target string
 		var path string
 
 		if strings.HasPrefix(requestURL, "http://") {
-			// 瑙ｆ瀽瀹屾暣 URL
+			// 解析完整 URL
 			urlWithoutScheme := strings.TrimPrefix(requestURL, "http://")
 			idx := strings.Index(urlWithoutScheme, "/")
 			if idx > 0 {
@@ -2719,7 +2799,7 @@ func handleHTTP(conn net.Conn, clientAddr string, firstByte byte) {
 				path = "/"
 			}
 		} else {
-			// 鐩稿璺緞锛屼粠 Host header 鑾峰彇
+			// 相对路径，从 Host header 获取
 			target = headers["host"]
 			path = requestURL
 		}
@@ -2729,16 +2809,17 @@ func handleHTTP(conn net.Conn, clientAddr string, firstByte byte) {
 			return
 		}
 
-		// 娣诲姞榛樿绔彛
+		// 添加默认端口
 		if !strings.Contains(target, ":") {
 			target += ":80"
 		}
 
-		// 閲嶆瀯 HTTP 璇锋眰锛堝幓鎺夊畬鏁?URL锛屼娇鐢ㄧ浉瀵硅矾寰勶級
+		// 重构 HTTP 请求（去掉完整 URL，使用相对路径）
 		var requestBuilder strings.Builder
 		requestBuilder.WriteString(fmt.Sprintf("%s %s %s\r\n", method, path, httpVersion))
 
-		// 鍐欏叆 headers锛堣繃婊ゆ帀 Proxy-Connection锛?		for _, line := range headerLines {
+		// 写入 headers（过滤掉 Proxy-Connection）
+		for _, line := range headerLines {
 			key := strings.Split(line, ":")[0]
 			keyLower := strings.ToLower(strings.TrimSpace(key))
 			if keyLower != "proxy-connection" && keyLower != "proxy-authorization" {
@@ -2748,11 +2829,11 @@ func handleHTTP(conn net.Conn, clientAddr string, firstByte byte) {
 		}
 		requestBuilder.WriteString("\r\n")
 
-		// 濡傛灉鏈夎姹備綋锛岄渶瑕佽鍙栧苟闄勫姞
+		// 如果有请求体，需要读取并附加
 		if contentLength := headers["content-length"]; contentLength != "" {
 			var length int
 			fmt.Sscanf(contentLength, "%d", &length)
-			if length > 0 && length < 10*1024*1024 { // 闄愬埗 10MB
+			if length > 0 && length < 10*1024*1024 { // 限制 10MB
 				body := make([]byte, length)
 				if _, err := io.ReadFull(reader, body); err == nil {
 					requestBuilder.Write(body)
@@ -2762,30 +2843,34 @@ func handleHTTP(conn net.Conn, clientAddr string, firstByte byte) {
 
 		firstFrame := requestBuilder.String()
 
-		// 浣跨敤 modeHTTPProxy 妯″紡锛堜笉鍙戦€?200 鍝嶅簲锛?		if err := handleTunnel(conn, target, clientAddr, modeHTTPProxy, firstFrame); err != nil {
+		// 使用 modeHTTPProxy 模式（不发送 200 响应）
+		if err := handleTunnel(conn, target, clientAddr, modeHTTPProxy, firstFrame); err != nil {
 			if !isNormalCloseError(err) {
-				log.Printf("[HTTP-%s] %s 浠ｇ悊澶辫触: %v", method, clientAddr, err)
+				log.Printf("[HTTP-%s] %s 代理失败: %v", method, clientAddr, err)
 			}
 		}
 
 	default:
-		log.Printf("[HTTP] %s 涓嶆敮鎸佺殑鏂规硶: %s", clientAddr, method)
+		log.Printf("[HTTP] %s 不支持的方法: %s", clientAddr, method)
 		conn.Write([]byte("HTTP/1.1 405 Method Not Allowed\r\n\r\n"))
 	}
 }
 
-// ======================== 閫氱敤闅ч亾澶勭悊 ========================
+// ======================== 通用隧道处理 ========================
 
-// 浠ｇ悊妯″紡甯搁噺
+// 代理模式常量
 const (
-	modeSOCKS5      = 1 // SOCKS5 浠ｇ悊
-	modeHTTPConnect = 2 // HTTP CONNECT 闅ч亾
-	modeHTTPProxy   = 3 // HTTP 鏅€氫唬鐞嗭紙GET/POST绛夛級
+	modeSOCKS5      = 1 // SOCKS5 代理
+	modeHTTPConnect = 2 // HTTP CONNECT 隧道
+	modeHTTPProxy   = 3 // HTTP 普通代理（GET/POST等）
 )
 
-// writeQueueSize 涓嬭寰呭啓闃熷垪闀垮害锛堜互娑堟伅涓哄崟浣嶏紝姣忔潯鏈€澶х害 64KB锛?// 鍙敤鏉ュ惛鏀剁煭鏃堕棿鐨勫啓闃诲锛岃繃澶т細鐧界櫧鍗犵敤鏈湴鍐呭瓨骞剁牬鍧?TCP 鑳屽帇鐨勫強鏃舵€?const writeQueueSize = 192
+// writeQueueSize 下行待写队列长度（以消息为单位，每条最大约 64KB）
+// 只用来吸收短时间的写阻塞，过大会白白占用本地内存并破坏 TCP 背压的及时性
+const writeQueueSize = 192
 
-// tokenBucket 鍗曡繛鎺ヤ笅琛岄檺閫熷櫒锛堜护鐗屾《锛?type tokenBucket struct {
+// tokenBucket 单连接下行限速器（令牌桶）
+type tokenBucket struct {
 	mu     sync.Mutex
 	tokens float64
 	rate   float64 // bytes/s
@@ -2793,20 +2878,21 @@ const (
 	last   time.Time
 }
 
-// newTokenBucket 鎸?Mbps 鍒涘缓闄愰€熷櫒锛宮bps <= 0 鏃惰繑鍥?nil锛堣〃绀轰笉闄愰€燂級
+// newTokenBucket 按 Mbps 创建限速器，mbps <= 0 时返回 nil（表示不限速）
 func newTokenBucket(mbps float64) *tokenBucket {
 	if mbps <= 0 {
 		return nil
 	}
 	rate := mbps * 125000 // Mbps -> bytes/s
-	burst := rate * 0.5   // 鍏佽 0.5 绉掔殑绐佸彂锛岄伩鍏嶉檺閫熸妸棣栧抚缂撳啿鎷栨參
+	burst := rate * 0.5   // 允许 0.5 秒的突发，避免限速把首帧缓冲拖慢
 	if burst < 65536 {
 		burst = 65536
 	}
 	return &tokenBucket{tokens: burst, rate: rate, burst: burst, last: time.Now()}
 }
 
-// wait 闃诲鐩村埌鍑戝 n 瀛楄妭鐨勯厤棰?func (tb *tokenBucket) wait(n int) {
+// wait 阻塞直到凑够 n 字节的配额
+func (tb *tokenBucket) wait(n int) {
 	if tb == nil || tb.rate <= 0 {
 		return
 	}
@@ -2836,20 +2922,22 @@ func newTokenBucket(mbps float64) *tokenBucket {
 }
 
 func handleTunnel(conn net.Conn, target, clientAddr string, mode int, firstFrame string) error {
-	// 瑙ｆ瀽鐩爣鍦板潃
+	// 解析目标地址
 	targetHost, _, err := net.SplitHostPort(target)
 	if err != nil {
 		targetHost = target
 	}
 
-	// 妫€鏌ユ槸鍚﹀簲璇ョ粫杩囦唬鐞嗭紙鐩磋繛锛?	rule := "proxy"
+	// 检查是否应该绕过代理（直连）
+	rule := "proxy"
 	if shouldBypassProxy(targetHost) {
 		rule = "direct"
-		log.Printf("[鍒嗘祦] %s -> %s (鐩磋繛, 妯″紡=%s)", clientAddr, target, routingMode)
+		log.Printf("[分流] %s -> %s (直连, 模式=%s)", clientAddr, target, routingMode)
 		return handleDirectConnection(conn, target, clientAddr, mode, firstFrame)
 	}
 
-	// 璧颁唬鐞?	modeStr := "socks5"
+	// 走代理
+	modeStr := "socks5"
 	if mode == modeHTTPConnect {
 		modeStr = "http-connect"
 	} else if mode == modeHTTPProxy {
@@ -2859,7 +2947,7 @@ func handleTunnel(conn net.Conn, target, clientAddr string, mode int, firstFrame
 	connInfoObj, _ := activeConns.Load(connID)
 	connInfoPtr := connInfoObj.(*connInfo)
 
-	log.Printf("[鍒嗘祦] %s -> %s (閫氳繃浠ｇ悊, 妯″紡=%s)", clientAddr, target, routingMode)
+	log.Printf("[分流] %s -> %s (通过代理, 模式=%s)", clientAddr, target, routingMode)
 	wsConn, err := dialWebSocketWithECH(2)
 	if err != nil {
 		removeConn(connID)
@@ -2869,7 +2957,7 @@ func handleTunnel(conn net.Conn, target, clientAddr string, mode int, firstFrame
 
 	var mu sync.Mutex
 	var closed atomic.Bool
-	stopCh := make(chan struct{}) // cleanup 鏃跺箍鎾紝鐢ㄤ簬鍞ら啋琚?channel 闃诲鐨?goroutine
+	stopCh := make(chan struct{}) // cleanup 时广播，用于唤醒被 channel 阻塞的 goroutine
 	closeOnce := sync.Once{}
 	cleanup := func() {
 		closeOnce.Do(func() {
@@ -2885,10 +2973,13 @@ func handleTunnel(conn net.Conn, target, clientAddr string, mode int, firstFrame
 	}
 	defer cleanup()
 
-	// ========== 淇濇椿涓庢椿鎬у垽瀹?==========
-	// 鍒绘剰涓嶄娇鐢?gorilla 鐨?SetReadDeadline 浣滀负闀胯繛鎺ョ殑璇昏秴鏃讹細
-	// 瑙嗛鎾斁鍣ㄧ紦鍐插～婊″悗浼氬仠姝㈣鍙栨暟鎹紝姝ゆ椂 Server->Client 浼氶樆濉炲湪 conn.Write 涓婏紝
-	// 浜庢槸鍐嶄篃娌′汉璋冪敤 ReadMessage锛宺ead deadline 鍒版湡灏变細鎶婁竴鏉′粛鍦ㄦ甯镐娇鐢ㄧ殑闅ч亾璇潃锛?	// 鑰?ping/pong 涔熸晳涓嶄簡锛坧ong 鍙湪 ReadMessage 璋冪敤鏈熼棿鎵嶄細琚鐞嗭級銆?	// 鏀圭敤缁熶竴鐨勭┖闂茶鏃跺櫒锛氫换涓€鏂瑰悜鏈夋暟鎹祦鍔ㄥ氨缁湡锛岀湡姝ｆ寔缁┖闂叉墠鍒ゅ畾涓烘杩炴帴銆?	var lastActive atomic.Int64 // UnixNano
+	// ========== 保活与活性判定 ==========
+	// 刻意不使用 gorilla 的 SetReadDeadline 作为长连接的读超时：
+	// 视频播放器缓冲填满后会停止读取数据，此时 Server->Client 会阻塞在 conn.Write 上，
+	// 于是再也没人调用 ReadMessage，read deadline 到期就会把一条仍在正常使用的隧道误杀，
+	// 而 ping/pong 也救不了（pong 只在 ReadMessage 调用期间才会被处理）。
+	// 改用统一的空闲计时器：任一方向有数据流动就续期，真正持续空闲才判定为死连接。
+	var lastActive atomic.Int64 // UnixNano
 	touch := func() { lastActive.Store(time.Now().UnixNano()) }
 	touch()
 
@@ -2918,7 +3009,7 @@ func handleTunnel(conn net.Conn, target, clientAddr string, mode int, firstFrame
 	}()
 	defer close(stopPing)
 
-	// 绌洪棽瓒呮椂宸℃锛氭瘮 read deadline 鏇村噯纭湴琛ㄨ揪"杩欐潯杩炴帴宸茬粡娌′汉鐢ㄤ簡"
+	// 空闲超时巡检：比 read deadline 更准确地表达"这条连接已经没人用了"
 	stopIdle := make(chan struct{})
 	go func() {
 		ticker := time.NewTicker(30 * time.Second)
@@ -2931,7 +3022,7 @@ func handleTunnel(conn net.Conn, target, clientAddr string, mode int, firstFrame
 				}
 				last := lastActive.Load()
 				if last > 0 && time.Since(time.Unix(0, last)) > idleTimeout && !closed.Load() {
-					log.Printf("[浠ｇ悊] %s 绌洪棽瓒呰繃 %s锛屽叧闂毀閬?, clientAddr, idleTimeout)
+					log.Printf("[代理] %s 空闲超过 %s，关闭隧道", clientAddr, idleTimeout)
 					cleanup()
 					return
 				}
@@ -2944,7 +3035,8 @@ func handleTunnel(conn net.Conn, target, clientAddr string, mode int, firstFrame
 
 	conn.SetDeadline(time.Time{})
 
-	// 濡傛灉娌℃湁棰勮鐨?firstFrame锛屽皾璇曡鍙栫涓€甯ф暟鎹紙浠?SOCKS5锛?	if firstFrame == "" && mode == modeSOCKS5 {
+	// 如果没有预设的 firstFrame，尝试读取第一帧数据（仅 SOCKS5）
+	if firstFrame == "" && mode == modeSOCKS5 {
 		_ = conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
 		buffer := make([]byte, 65536)
 		n, _ := conn.Read(buffer)
@@ -2954,7 +3046,8 @@ func handleTunnel(conn net.Conn, target, clientAddr string, mode int, firstFrame
 		}
 	}
 
-	// 鍙戦€佽繛鎺ヨ姹?	connectMsg := fmt.Sprintf("CONNECT:%s|%s", target, firstFrame)
+	// 发送连接请求
+	connectMsg := fmt.Sprintf("CONNECT:%s|%s", target, firstFrame)
 	mu.Lock()
 	err = wsConn.WriteMessage(websocket.TextMessage, []byte(connectMsg))
 	mu.Unlock()
@@ -2964,14 +3057,16 @@ func handleTunnel(conn net.Conn, target, clientAddr string, mode int, firstFrame
 		return err
 	}
 
-	// 绛夊緟鍝嶅簲锛堟彙鎵嬮樁娈典粛淇濈暀璇昏秴鏃讹紝閬垮厤杩炰笉涓婃椂姘镐箙鎸備綇锛?	wsConn.SetReadDeadline(time.Now().Add(20 * time.Second))
+	// 等待响应（握手阶段仍保留读超时，避免连不上时永久挂住）
+	wsConn.SetReadDeadline(time.Now().Add(20 * time.Second))
 	_, msg, err := wsConn.ReadMessage()
 	if err != nil {
 		removeConn(connID)
 		sendErrorResponse(conn, mode)
 		return err
 	}
-	// 鎻℃墜瀹屾垚鍚庡彇娑堝簳灞傝瓒呮椂锛岄暱杩炴帴鐨勬椿鎬ф敼鐢变笂闈㈢殑绌洪棽璁℃椂鍣ㄨ礋璐?	wsConn.SetReadDeadline(time.Time{})
+	// 握手完成后取消底层读超时，长连接的活性改由上面的空闲计时器负责
+	wsConn.SetReadDeadline(time.Time{})
 	touch()
 
 	response := string(msg)
@@ -2983,22 +3078,24 @@ func handleTunnel(conn net.Conn, target, clientAddr string, mode int, firstFrame
 	if response != "CONNECTED" {
 		removeConn(connID)
 		sendErrorResponse(conn, mode)
-		return fmt.Errorf("鎰忓鍝嶅簲: %s", response)
+		return fmt.Errorf("意外响应: %s", response)
 	}
 
-	// 鍙戦€佹垚鍔熷搷搴旓紙鏍规嵁妯″紡涓嶅悓鑰屼笉鍚岋級
+	// 发送成功响应（根据模式不同而不同）
 	if err := sendSuccessResponse(conn, mode); err != nil {
 		removeConn(connID)
 		return err
 	}
 
-	log.Printf("[浠ｇ悊] %s 宸茶繛鎺? %s", clientAddr, target)
+	log.Printf("[代理] %s 已连接: %s", clientAddr, target)
 
-	// 鍙屽悜杞彂
-	// done 蹇呴』鏄甫缂撳啿鐨勶紝涓斿彂閫佹柟鐢ㄩ樆濉炲彂閫侊細
-	// 涓嬮潰鎭板ソ鏈?2 涓崗绋嬪悇鑷彂閫佷竴娆★紙Client->Server銆佹帓绌?writeQueue 鐨勫啓鍗忕▼锛夛紝
-	// 缂撳啿 2 淇濊瘉涓ゆ鍙戦€侀兘涓嶄細闃诲锛涘彧瑕佹湁涓€涓崗绋嬬粨鏉燂紝涓诲崗绋嬪氨鑳界珛鍒绘敹灏俱€?	// 鍒囧嬁鏀瑰洖 select/default 鈥斺€?閭ｇ瓑浜庡厑璁镐俊鍙疯涓㈠純锛屼袱涓崗绋嬭嫢閮藉厛浜庝富鍗忕▼閫€鍑猴紝
-	// 涓诲崗绋嬩細姘镐箙闃诲鍦?<-done 涓婏紝cleanup 姘镐笉鎵ц锛岃繛鎺ヤ笌 goroutine 鍏ㄩ儴娉勬紡銆?	done := make(chan struct{}, 2)
+	// 双向转发
+	// done 必须是带缓冲的，且发送方用阻塞发送：
+	// 下面恰好有 2 个协程各自发送一次（Client->Server、排空 writeQueue 的写协程），
+	// 缓冲 2 保证两次发送都不会阻塞；只要有一个协程结束，主协程就能立刻收尾。
+	// 切勿改回 select/default —— 那等于允许信号被丢弃，两个协程若都先于主协程退出，
+	// 主协程会永久阻塞在 <-done 上，cleanup 永不执行，连接与 goroutine 全部泄漏。
+	done := make(chan struct{}, 2)
 
 	// Client -> Server
 	go func() {
@@ -3008,7 +3105,7 @@ func handleTunnel(conn net.Conn, target, clientAddr string, mode int, firstFrame
 			n, err := conn.Read(buf)
 			if err != nil {
 				if !isNormalCloseError(err) {
-					log.Printf("[浠ｇ悊] %s 瀹㈡埛绔鍙栭敊璇? %v", clientAddr, err)
+					log.Printf("[代理] %s 客户端读取错误: %v", clientAddr, err)
 				}
 				mu.Lock()
 				if !closed.Load() {
@@ -3035,15 +3132,21 @@ func handleTunnel(conn net.Conn, target, clientAddr string, mode int, firstFrame
 	}()
 
 	// Server -> Client
-	// 杩欓噷鎶娿€岃 WebSocket銆嶅拰銆屽啓缁欐湰鍦拌繛鎺ャ€嶆媶鍒颁袱涓?goroutine锛屼腑闂寸敤涓€涓湁鐣岄槦鍒楄鎺ャ€?	// 鍘熷洜锛氭挱鏀惧櫒缂撳啿濉弧鍚庡仠姝㈣鍙栨椂锛宑onn.Write 浼氶暱鏃堕棿闃诲銆傝嫢璇诲啓鍦ㄥ悓涓€ goroutine锛?	// 闃诲鏈熼棿灏辨病浜哄幓璇?WebSocket锛屼笂灞傞摼璺畬鍏ㄥ仠鎽嗭紝涓旈敊杩?pong 澶勭悊銆?	// 闃熷垪鏈夌晫锛堣 writeQueueSize锛夛紝鍐欎笉杩涘幓鏃惰渚т篃浼氶樆濉烇紝TCP 鑳屽帇浠嶇劧鑳戒紶瀵煎埌婧愮珯銆?	writeQueue := make(chan []byte, writeQueueSize)
+	// 这里把「读 WebSocket」和「写给本地连接」拆到两个 goroutine，中间用一个有界队列衔接。
+	// 原因：播放器缓冲填满后停止读取时，conn.Write 会长时间阻塞。若读写在同一 goroutine，
+	// 阻塞期间就没人去读 WebSocket，上层链路完全停摆，且错过 pong 处理。
+	// 队列有界（见 writeQueueSize），写不进去时读侧也会阻塞，TCP 背压仍然能传导到源站。
+	writeQueue := make(chan []byte, writeQueueSize)
 
 	go func() {
-		// 娉ㄦ剰锛氳繖閲屼笉涓诲姩閫氱煡 done銆傝渚х粨鏉熸椂鍙叧闂槦鍒楋紝鐢卞啓渚ф妸闃熷垪鎺掔┖鍚庡啀鏀跺熬锛?		// 鍚﹀垯鏈嶅姟绔彂瀹屾暟鎹氨鍏?WS锛圚TTP 鍝嶅簲缁撴潫鐨勫父瑙佸舰鎬侊級鏃讹紝灏鹃儴鏁版嵁浼氳鎴帀銆?		defer close(writeQueue)
+		// 注意：这里不主动通知 done。读侧结束时只关闭队列，由写侧把队列排空后再收尾，
+		// 否则服务端发完数据就关 WS（HTTP 响应结束的常见形态）时，尾部数据会被截掉。
+		defer close(writeQueue)
 		for {
 			mt, msg, err := wsConn.ReadMessage()
 			if err != nil {
 				if !isNormalCloseError(err) {
-					log.Printf("[浠ｇ悊] %s WebSocket 璇诲彇閿欒: %v", clientAddr, err)
+					log.Printf("[代理] %s WebSocket 读取错误: %v", clientAddr, err)
 				}
 				return
 			}
@@ -3058,7 +3161,7 @@ func handleTunnel(conn net.Conn, target, clientAddr string, mode int, firstFrame
 
 			connInfoPtr.download.Add(int64(len(msg)))
 
-			// gorilla 鐨?ReadMessage 姣忔杩斿洖鐙珛鍒嗛厤鐨勫垏鐗囷紝鍙畨鍏ㄤ氦缁欏彟涓€涓?goroutine
+			// gorilla 的 ReadMessage 每次返回独立分配的切片，可安全交给另一个 goroutine
 			select {
 			case writeQueue <- msg:
 			case <-stopCh:
@@ -3067,7 +3170,9 @@ func handleTunnel(conn net.Conn, target, clientAddr string, mode int, firstFrame
 		}
 	}()
 
-	// 涓嬭闄愰€熷櫒锛氭寜鍗曡繛鎺ュ钩婊戣緭鍑猴紝閬垮厤鐭椂闂村唴鎶婂ぇ閲忔暟鎹帹鍚戞挱鏀惧櫒锛?	// 浠庤€屽湪 worker 渚х殑 send 闃熷垪閲屽爢绉紙Cloudflare 姣忔潯 WS 鍗曠嫭闄愯祫婧愶紝鍫嗙Н鍚?GC 鍘嬪姏浼氳鍚炲悙鎸佺画涓嬮檷锛?	limiter := newTokenBucket(downLimitMbps)
+	// 下行限速器：按单连接平滑输出，避免短时间内把大量数据推向播放器，
+	// 从而在 worker 侧的 send 队列里堆积（Cloudflare 每条 WS 单独限资源，堆积后 GC 压力会让吞吐持续下降）
+	limiter := newTokenBucket(downLimitMbps)
 
 	go func() {
 		defer func() { done <- struct{}{} }()
@@ -3087,18 +3192,19 @@ func handleTunnel(conn net.Conn, target, clientAddr string, mode int, firstFrame
 	<-done
 	cleanup()
 	removeConn(connID)
-	log.Printf("[浠ｇ悊] %s 宸叉柇寮€: %s", clientAddr, target)
+	log.Printf("[代理] %s 已断开: %s", clientAddr, target)
 	return nil
 }
 
-// ======================== 鐩磋繛澶勭悊 ========================
+// ======================== 直连处理 ========================
 
-// handleDirectConnection 澶勭悊鐩磋繛锛堢粫杩囦唬鐞嗭級
+// handleDirectConnection 处理直连（绕过代理）
 func handleDirectConnection(conn net.Conn, target, clientAddr string, mode int, firstFrame string) error {
-	// 瑙ｆ瀽鐩爣鍦板潃
+	// 解析目标地址
 	host, port, err := net.SplitHostPort(target)
 	if err != nil {
-		// 濡傛灉娌℃湁绔彛锛屾牴鎹ā寮忔坊鍔犻粯璁ょ鍙?		host = target
+		// 如果没有端口，根据模式添加默认端口
+		host = target
 		if mode == modeHTTPConnect || mode == modeHTTPProxy {
 			port = "443"
 		} else {
@@ -3117,14 +3223,15 @@ func handleDirectConnection(conn net.Conn, target, clientAddr string, mode int, 
 	connInfoObj, _ := activeConns.Load(connID)
 	connInfoPtr := connInfoObj.(*connInfo)
 
-	// 鐩存帴杩炴帴鍒扮洰鏍?	targetConn, err := net.DialTimeout("tcp", target, 10*time.Second)
+	// 直接连接到目标
+	targetConn, err := net.DialTimeout("tcp", target, 10*time.Second)
 	if err != nil {
 		removeConn(connID)
 		sendErrorResponse(conn, mode)
-		return fmt.Errorf("鐩磋繛澶辫触: %w", err)
+		return fmt.Errorf("直连失败: %w", err)
 	}
 
-	// 瀵圭洿杩炵洰鏍囦篃鍚敤 TCP_NODELAY
+	// 对直连目标也启用 TCP_NODELAY
 	if tcpConn, ok := targetConn.(*net.TCPConn); ok {
 		tcpConn.SetNoDelay(true)
 		tcpConn.SetReadBuffer(256 * 1024)
@@ -3142,12 +3249,14 @@ func handleDirectConnection(conn net.Conn, target, clientAddr string, mode int, 
 
 	conn.SetDeadline(time.Time{})
 
-	// 鍙戦€佹垚鍔熷搷搴?	if err := sendSuccessResponse(conn, mode); err != nil {
+	// 发送成功响应
+	if err := sendSuccessResponse(conn, mode); err != nil {
 		removeConn(connID)
 		return err
 	}
 
-	// 濡傛灉鏈夐璁剧殑绗竴甯ф暟鎹紝鍏堝彂閫?	if firstFrame != "" {
+	// 如果有预设的第一帧数据，先发送
+	if firstFrame != "" {
 		data := []byte(firstFrame)
 		written := 0
 		for written < len(data) {
@@ -3160,8 +3269,9 @@ func handleDirectConnection(conn net.Conn, target, clientAddr string, mode int, 
 		}
 	}
 
-	// 鍙屽悜杞彂
-	// done 甯︾紦鍐?+ 闃诲鍙戦€侊紝鐞嗙敱鍚?handleTunnel锛氫笅闈㈡伆濂?2 涓彂閫佹柟锛岀紦鍐?2 淇濊瘉涓嶄細闃诲銆?	done := make(chan struct{}, 2)
+	// 双向转发
+	// done 带缓冲 + 阻塞发送，理由同 handleTunnel：下面恰好 2 个发送方，缓冲 2 保证不会阻塞。
+	done := make(chan struct{}, 2)
 
 	// Client -> Target
 	go func() {
@@ -3208,11 +3318,11 @@ func handleDirectConnection(conn net.Conn, target, clientAddr string, mode int, 
 	<-done
 	cleanup()
 	removeConn(connID)
-	log.Printf("[鍒嗘祦] %s 鐩磋繛宸叉柇寮€: %s", clientAddr, target)
+	log.Printf("[分流] %s 直连已断开: %s", clientAddr, target)
 	return nil
 }
 
-// ======================== 鍝嶅簲杈呭姪鍑芥暟 ========================
+// ======================== 响应辅助函数 ========================
 
 func sendErrorResponse(conn net.Conn, mode int) {
 	switch mode {
@@ -3226,15 +3336,15 @@ func sendErrorResponse(conn net.Conn, mode int) {
 func sendSuccessResponse(conn net.Conn, mode int) error {
 	switch mode {
 	case modeSOCKS5:
-		// SOCKS5 鎴愬姛鍝嶅簲
+		// SOCKS5 成功响应
 		_, err := conn.Write([]byte{0x05, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00})
 		return err
 	case modeHTTPConnect:
-		// HTTP CONNECT 闇€瑕佸彂閫?200 鍝嶅簲
+		// HTTP CONNECT 需要发送 200 响应
 		_, err := conn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
 		return err
 	case modeHTTPProxy:
-		// HTTP GET/POST 绛変笉闇€瑕佸彂閫佸搷搴旓紝鐩存帴杞彂鐩爣鏈嶅姟鍣ㄧ殑鍝嶅簲
+		// HTTP GET/POST 等不需要发送响应，直接转发目标服务器的响应
 		return nil
 	}
 	return nil

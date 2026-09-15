@@ -1,4 +1,4 @@
-﻿module ech-workers
+module ech-workers
 
 go 1.23
 
