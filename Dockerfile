@@ -1,7 +1,7 @@
 FROM golang:1.23-alpine AS builder
 RUN apk add --no-cache git
 WORKDIR /build
-COPY src/go.mod src/go.sum ./
+COPY src/go.mod ./
 RUN go mod download
 COPY src/ech-workers.go src/index.html ./
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o ech-workers ech-workers.go
