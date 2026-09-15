@@ -1,0 +1,443 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>超现实星夜</title>
+<style>
+  html,body{margin:0;padding:0;background:#050818;overflow:hidden;font-family:sans-serif;}
+  .wrap{width:100vw;height:100vh;display:flex;align-items:center;justify-content:center;}
+  svg{width:100%;height:100%;max-width:100vw;max-height:100vh;display:block;}
+  .title{position:fixed;top:10px;left:14px;color:#c9d6ff;font-size:13px;letter-spacing:2px;opacity:.6;z-index:5;text-shadow:0 0 6px #000;}
+</style>
+</head>
+<body>
+<div class="title">· 超 现 实 星 夜 ·</div>
+<div class="wrap">
+<svg viewBox="0 0 1800 1200" xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="xMidYMid slice">
+<defs>
+<!-- ============ 渐变定义 ============ -->
+<radialGradient id="skyBase" cx="50%" cy="38%" r="85%">
+  <stop offset="0%" stop-color="#1a2a6b"/>
+  <stop offset="45%" stop-color="#0d1b4a"/>
+  <stop offset="100%" stop-color="#050a24"/>
+</radialGradient>
+
+<radialGradient id="supernova" cx="50%" cy="50%" r="50%">
+  <stop offset="0%" stop-color="#ffffff"/>
+  <stop offset="12%" stop-color="#fff4c2"/>
+  <stop offset="35%" stop-color="#ff9d3a"/>
+  <stop offset="60%" stop-color="#ff4d1f"/>
+  <stop offset="80%" stop-color="#b3124a" stop-opacity="0.6"/>
+  <stop offset="100%" stop-color="#2a0a3a" stop-opacity="0"/>
+</radialGradient>
+
+<radialGradient id="starGlow" cx="50%" cy="50%" r="50%">
+  <stop offset="0%" stop-color="#fffbe0" stop-opacity="1"/>
+  <stop offset="40%" stop-color="#ffe680" stop-opacity="0.7"/>
+  <stop offset="100%" stop-color="#ffd24d" stop-opacity="0"/>
+</radialGradient>
+
+<radialGradient id="meteorHead" cx="50%" cy="50%" r="50%">
+  <stop offset="0%" stop-color="#fff"/>
+  <stop offset="40%" stop-color="#ffd27a"/>
+  <stop offset="100%" stop-color="#ff5a1f" stop-opacity="0"/>
+</radialGradient>
+
+<linearGradient id="groundGrad" x1="0" y1="0" x2="0" y2="1">
+  <stop offset="0%" stop-color="#1a2a1e"/>
+  <stop offset="50%" stop-color="#0e1a12"/>
+  <stop offset="100%" stop-color="#050a08"/>
+</linearGradient>
+
+<linearGradient id="goldChair" x1="0" y1="0" x2="1" y2="1">
+  <stop offset="0%" stop-color="#fff3a0"/>
+  <stop offset="30%" stop-color="#ffd23f"/>
+  <stop offset="60%" stop-color="#e0a417"/>
+  <stop offset="100%" stop-color="#8a5e0a"/>
+</linearGradient>
+
+<linearGradient id="goldChairShade" x1="0" y1="0" x2="0" y2="1">
+  <stop offset="0%" stop-color="#ffe680"/>
+  <stop offset="100%" stop-color="#a9740f"/>
+</linearGradient>
+
+<linearGradient id="dinoBody" x1="0" y1="0" x2="0" y2="1">
+  <stop offset="0%" stop-color="#4f8a3a"/>
+  <stop offset="55%" stop-color="#2f6b22"/>
+  <stop offset="100%" stop-color="#173811"/>
+</linearGradient>
+
+<linearGradient id="heronBody" x1="0" y1="0" x2="0" y2="1">
+  <stop offset="0%" stop-color="#e8edf2"/>
+  <stop offset="100%" stop-color="#8a98a8"/>
+</linearGradient>
+
+<linearGradient id="bearFur" x1="0" y1="0" x2="0" y2="1">
+  <stop offset="0%" stop-color="#ffffff"/>
+  <stop offset="100%" stop-color="#bcc6d6"/>
+</linearGradient>
+
+<linearGradient id="armorMetal" x1="0" y1="0" x2="1" y2="1">
+  <stop offset="0%" stop-color="#e9eef5"/>
+  <stop offset="40%" stop-color="#8a96a8"/>
+  <stop offset="100%" stop-color="#3a4354"/>
+</linearGradient>
+
+<linearGradient id="copperBike" x1="0" y1="0" x2="1" y2="1">
+  <stop offset="0%" stop-color="#7fb069"/>
+  <stop offset="35%" stop-color="#3f7d4a"/>
+  <stop offset="70%" stop-color="#1f5233"/>
+  <stop offset="100%" stop-color="#0d2a1c"/>
+</linearGradient>
+
+<linearGradient id="pelicanBody" x1="0" y1="0" x2="0" y2="1">
+  <stop offset="0%" stop-color="#f5f0e6"/>
+  <stop offset="100%" stop-color="#b8a88a"/>
+</linearGradient>
+
+<linearGradient id="fishBody" x1="0" y1="0" x2="1" y2="0">
+  <stop offset="0%" stop-color="#7fd8c8"/>
+  <stop offset="50%" stop-color="#3aa0a0"/>
+  <stop offset="100%" stop-color="#1d5f6a"/>
+</linearGradient>
+
+<linearGradient id="f14body" x1="0" y1="0" x2="0" y2="1">
+  <stop offset="0%" stop-color="#c9ccd2"/>
+  <stop offset="100%" stop-color="#5a6068"/>
+</linearGradient>
+
+<linearGradient id="pl12missile" x1="0" y1="0" x2="0" y2="1">
+  <stop offset="0%" stop-color="#e8e8e8"/>
+  <stop offset="100%" stop-color="#7a7a7a"/>
+</linearGradient>
+
+<linearGradient id="ultraBody" x1="0" y1="0" x2="0" y2="1">
+  <stop offset="0%" stop-color="#d8e8ff"/>
+  <stop offset="100%" stop-color="#7aa0d8"/>
+</linearGradient>
+
+<linearGradient id="ultraRed" x1="0" y1="0" x2="0" y2="1">
+  <stop offset="0%" stop-color="#ff5a5a"/>
+  <stop offset="100%" stop-color="#a01818"/>
+</linearGradient>
+
+<radialGradient id="bombGlow" cx="50%" cy="50%" r="50%">
+  <stop offset="0%" stop-color="#fff7c0"/>
+  <stop offset="40%" stop-color="#ff8a3a" stop-opacity="0.9"/>
+  <stop offset="100%" stop-color="#ff2a1f" stop-opacity="0"/>
+</radialGradient>
+
+<radialGradient id="impactGlow" cx="50%" cy="50%" r="50%">
+  <stop offset="0%" stop-color="#fff"/>
+  <stop offset="30%" stop-color="#ffe27a"/>
+  <stop offset="70%" stop-color="#ff7a1f" stop-opacity="0.5"/>
+  <stop offset="100%" stop-color="#ff3a1f" stop-opacity="0"/>
+</radialGradient>
+
+<linearGradient id="qinRobe" x1="0" y1="0" x2="0" y2="1">
+  <stop offset="0%" stop-color="#2a0a0a"/>
+  <stop offset="100%" stop-color="#5a0a0a"/>
+</linearGradient>
+
+<!-- swirl pattern for starry night -->
+<pattern id="swirls" x="0" y="0" width="400" height="400" patternUnits="userSpaceOnUse">
+  <circle cx="80" cy="80" r="60" fill="none" stroke="#2a4a9a" stroke-width="3" opacity="0.35"/>
+  <circle cx="80" cy="80" r="40" fill="none" stroke="#3a6aba" stroke-width="2" opacity="0.4"/>
+  <circle cx="80" cy="80" r="20" fill="none" stroke="#5a8aea" stroke-width="1.5" opacity="0.5"/>
+  <circle cx="300" cy="250" r="80" fill="none" stroke="#2a4a9a" stroke-width="3" opacity="0.3"/>
+  <circle cx="300" cy="250" r="55" fill="none" stroke="#3a6aba" stroke-width="2" opacity="0.35"/>
+  <circle cx="300" cy="250" r="30" fill="none" stroke="#5a8aea" stroke-width="1.5" opacity="0.45"/>
+</pattern>
+
+<!-- ============ 滤镜 ============ -->
+<filter id="softGlow" x="-50%" y="-50%" width="200%" height="200%">
+  <feGaussianBlur stdDeviation="6" result="b"/>
+  <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+</filter>
+
+<filter id="bigGlow" x="-100%" y="-100%" width="300%" height="300%">
+  <feGaussianBlur stdDeviation="22" result="b"/>
+  <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+</filter>
+
+<filter id="roughMetal" x="0" y="0" width="100%" height="100%">
+  <feTurbulence type="fractalNoise" baseFrequency="0.9" numOctaves="2" result="n"/>
+  <feColorMatrix in="n" type="matrix" values="0 0 0 0 0.9  0 0 0 0 0.9  0 0 0 0 1  0 0 0 0.25 0"/>
+  <feComposite in2="SourceGraphic" operator="in"/>
+  <feMerge><feMergeNode in="SourceGraphic"/><feMergeNode/></feMerge>
+</filter>
+
+<filter id="textured">
+  <feTurbulence type="fractalNoise" baseFrequency="0.04" numOctaves="3" result="n"/>
+  <feColorMatrix in="n" type="saturate" values="0"/>
+  <feComposite in2="SourceGraphic" operator="arithmetic" k1="0" k2="1" k3="1" k4="0"/>
+</filter>
+
+<filter id="dropShadow" x="-20%" y="-20%" width="140%" height="140%">
+  <feGaussianBlur in="SourceAlpha" stdDeviation="4"/>
+  <feOffset dx="2" dy="4" result="o"/>
+  <feComponentTransfer><feFuncA type="linear" slope="0.5"/></feComponentTransfer>
+  <feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge>
+</filter>
+</defs>
+
+<!-- ============ 背景天空 ============ -->
+<rect x="0" y="0" width="1800" height="1200" fill="url(#skyBase)"/>
+<rect x="0" y="0" width="1800" height="1200" fill="url(#swirls)" opacity="0.8"/>
+
+<!-- 梵高式大漩涡 -->
+<g opacity="0.55" fill="none">
+  <ellipse cx="900" cy="500" rx="520" ry="180" stroke="#2c4a8a" stroke-width="2.5" transform="rotate(-8 900 500)"/>
+  <ellipse cx="900" cy="500" rx="420" ry="140" stroke="#3a5faa" stroke-width="2" transform="rotate(-8 900 500)"/>
+  <ellipse cx="900" cy="500" rx="320" ry="100" stroke="#4a74c0" stroke-width="1.6" transform="rotate(-8 900 500)"/>
+  <ellipse cx="900" cy="500" rx="220" ry="65" stroke="#6a94e0" stroke-width="1.3" transform="rotate(-8 900 500)"/>
+  <ellipse cx="900" cy="500" rx="120" ry="32" stroke="#8ab0f0" stroke-width="1" transform="rotate(-8 900 500)"/>
+</g>
+<g opacity="0.4" fill="none" transform="rotate(12 400 300)">
+  <circle cx="400" cy="300" r="180" stroke="#2c4a8a" stroke-width="2"/>
+  <circle cx="400" cy="300" r="130" stroke="#3a5faa" stroke-width="1.7"/>
+  <circle cx="400" cy="300" r="85" stroke="#5a84d0" stroke-width="1.3"/>
+  <circle cx="400" cy="300" r="45" stroke="#7aa4f0" stroke-width="1"/>
+</g>
+
+<!-- 散布星星 -->
+<g fill="url(#starGlow)">
+  <circle cx="120" cy="90" r="14"/><circle cx="120" cy="90" r="3" fill="#fff"/>
+  <circle cx="260" cy="180" r="11"/><circle cx="260" cy="180" r="2.5" fill="#fff"/>
+  <circle cx="540" cy="70" r="16"/><circle cx="540" cy="70" r="3.5" fill="#fff"/>
+  <circle cx="720" cy="160" r="10"/><circle cx="720" cy="160" r="2" fill="#fff"/>
+  <circle cx="1050" cy="110" r="13"/><circle cx="1050" cy="110" r="3" fill="#fff"/>
+  <circle cx="1300" cy="200" r="12"/><circle cx="1300" cy="200" r="2.5" fill="#fff"/>
+  <circle cx="1500" cy="90" r="15"/><circle cx="1500" cy="90" r="3.2" fill="#fff"/>
+  <circle cx="1650" cy="260" r="10"/><circle cx="1650" cy="260" r="2" fill="#fff"/>
+  <circle cx="180" cy="380" r="9"/><circle cx="180" cy="380" r="2" fill="#fff"/>
+  <circle cx="620" cy="320" r="12"/><circle cx="620" cy="320" r="2.6" fill="#fff"/>
+  <circle cx="1150" cy="380" r="10"/><circle cx="1150" cy="380" r="2.2" fill="#fff"/>
+  <circle cx="1450" cy="450" r="11"/><circle cx="1450" cy="450" r="2.3" fill="#fff"/>
+  <circle cx="80" cy="600" r="10"/><circle cx="80" cy="600" r="2" fill="#fff"/>
+  <circle cx="350" cy="700" r="9"/><circle cx="350" cy="700" r="2" fill="#fff"/>
+</g>
+<!-- 小星点 -->
+<g fill="#fff8d0" opacity="0.8">
+  <circle cx="200" cy="50" r="1.5"/><circle cx="350" cy="130" r="1"/><circle cx="480" cy="220" r="1.3"/>
+  <circle cx="680" cy="60" r="1"/><circle cx="850" cy="180" r="1.2"/><circle cx="980" cy="70" r="1.5"/>
+  <circle cx="1200" cy="150" r="1"/><circle cx="1380" cy="300" r="1.3"/><circle cx="1580" cy="160" r="1.1"/>
+  <circle cx="100" cy="250" r="1.2"/><circle cx="300" cy="420" r="1"/><circle cx="560" cy="480" r="1.3"/>
+  <circle cx="780" cy="400" r="1"/><circle cx="1080" cy="280" r="1.1"/><circle cx="1620" cy="400" r="1"/>
+</g>
+
+<!-- 月亮 -->
+<g filter="url(#softGlow)">
+  <circle cx="160" cy="150" r="55" fill="#f4e8a0" opacity="0.95"/>
+  <circle cx="150" cy="142" r="48" fill="#fff6c8" opacity="0.6"/>
+</g>
+<circle cx="145" cy="135" r="8" fill="#e8d880" opacity="0.5"/>
+<circle cx="175" cy="160" r="6" fill="#e8d880" opacity="0.4"/>
+<circle cx="160" cy="120" r="5" fill="#e8d880" opacity="0.45"/>
+
+<!-- ============ 超新星爆发 ============ -->
+<g transform="translate(1480,160)">
+  <circle r="180" fill="url(#supernova)" filter="url(#bigGlow)"/>
+  <circle r="60" fill="#fff8e0"/>
+  <circle r="30" fill="#ffffff"/>
+  <!-- 爆发射线 -->
+  <g stroke="#fff4c0" stroke-width="3" opacity="0.8">
+    <line x1="0" y1="0" x2="0" y2="-150"/>
+    <line x1="0" y1="0" x2="120" y2="-90"/>
+    <line x1="0" y1="0" x2="150" y2="0"/>
+    <line x1="0" y1="0" x2="100" y2="110"/>
+    <line x1="0" y1="0" x2="0" y2="140"/>
+    <line x1="0" y1="0" x2="-110" y2="100"/>
+    <line x1="0" y1="0" x2="-150" y2="0"/>
+    <line x1="0" y1="0" x2="-100" y2="-110"/>
+  </g>
+  <!-- 冲击波环 -->
+  <circle r="100" fill="none" stroke="#ffb060" stroke-width="4" opacity="0.6"/>
+  <circle r="140" fill="none" stroke="#ff7040" stroke-width="3" opacity="0.4"/>
+  <circle r="180" fill="none" stroke="#ff4060" stroke-width="2" opacity="0.25"/>
+</g>
+
+<!-- ============ 陨石拖尾 从超新星到恐龙 ============ -->
+<g>
+  <path d="M1480,160 Q1100,420 700,820" fill="none" stroke="#ff8a3a" stroke-width="14" opacity="0.4" filter="url(#softGlow)"/>
+  <path d="M1480,160 Q1100,420 700,820" fill="none" stroke="#ffc060" stroke-width="7" opacity="0.7"/>
+  <path d="M1480,160 Q1100,420 700,820" fill="none" stroke="#fff4c0" stroke-width="3" opacity="0.9"/>
+  <!-- 陨石头 -->
+  <ellipse cx="700" cy="820" rx="26" ry="20" fill="url(#meteorHead)" filter="url(#softGlow)" transform="rotate(30 700 820)"/>
+  <ellipse cx="700" cy="820" rx="12" ry="9" fill="#3a2a1a" transform="rotate(30 700 820)"/>
+  <ellipse cx="695" cy="815" rx="4" ry="3" fill="#5a4a3a" transform="rotate(30 700 820)"/>
+</g>
+
+<!-- ============ 地面 ============ -->
+<path d="M0,860 Q300,820 600,850 Q900,880 1200,840 Q1500,810 1800,860 L1800,1200 L0,1200 Z" fill="url(#groundGrad)"/>
+<path d="M0,880 Q400,850 900,870 Q1400,890 1800,860" fill="none" stroke="#2a3a2a" stroke-width="2" opacity="0.5"/>
+<!-- 地面小起伏 -->
+<path d="M100,870 Q200,855 300,868" fill="none" stroke="#2a3a2a" stroke-width="1.5" opacity="0.4"/>
+<path d="M1300,855 Q1400,840 1500,852" fill="none" stroke="#2a3a2a" stroke-width="1.5" opacity="0.4"/>
+
+<!-- ============ 陨石撞击恐龙头部的冲击光 ============ -->
+<circle cx="700" cy="818" r="70" fill="url(#impactGlow)" filter="url(#bigGlow)" opacity="0.8"/>
+<circle cx="700" cy="818" r="30" fill="#fff8d0" opacity="0.9"/>
+
+<!-- ============ 恐龙 ============ -->
+<g transform="translate(0,0)">
+  <!-- 尾巴 -->
+  <path d="M420,820 Q300,830 180,860 Q120,870 80,858 Q120,848 200,842 Q320,810 430,800 Z" fill="url(#dinoBody)" stroke="#1a3a10" stroke-width="2"/>
+  <!-- 身体 -->
+  <path d="M430,800 Q470,740 560,720 Q660,705 760,715 Q820,725 860,760 Q880,790 860,830 Q840,870 780,875 Q700,880 620,870 Q520,860 460,840 Q430,825 430,800 Z" fill="url(#dinoBody)" stroke="#1a3a10" stroke-width="2.5"/>
+  <!-- 背部棘刺 -->
+  <path d="M500,728 L510,695 L520,726 Z" fill="#6fa050" stroke="#1a3a10" stroke-width="1.2"/>
+  <path d="M560,715 L572,680 L582,714 Z" fill="#6fa050" stroke="#1a3a10" stroke-width="1.2"/>
+  <path d="M620,710 L632,672 L642,709 Z" fill="#6fa050" stroke="#1a3a10" stroke-width="1.2"/>
+  <path d="M680,712 L690,678 L700,711 Z" fill="#6fa050" stroke="#1a3a10" stroke-width="1.2"/>
+  <path d="M740,718 L748,690 L756,717 Z" fill="#6fa050" stroke="#1a3a10" stroke-width="1.2"/>
+  <!-- 腿 -->
+  <path d="M540,860 L530,940 L560,945 L572,870 Z" fill="url(#dinoBody)" stroke="#1a3a10" stroke-width="2"/>
+  <path d="M700,870 L695,950 L730,952 L740,872 Z" fill="url(#dinoBody)" stroke="#1a3a10" stroke-width="2"/>
+  <!-- 脚 -->
+  <ellipse cx="545" cy="948" rx="28" ry="10" fill="#1a3a10"/>
+  <ellipse cx="712" cy="955" rx="30" ry="11" fill="#1a3a10"/>
+  <!-- 小手臂 -->
+  <path d="M760,780 Q780,790 795,780 L790,800 L770,802 Z" fill="url(#dinoBody)" stroke="#1a3a10" stroke-width="1.5"/>
+  <!-- 脖子 -->
+  <path d="M760,760 Q780,700 720,660 Q690,650 680,690 Q690,730 740,755 Z" fill="url(#dinoBody)" stroke="#1a3a10" stroke-width="2.5"/>
+  <!-- 头部 -->
+  <path d="M680,690 Q660,650 700,625 Q740,615 770,640 Q790,660 775,690 Q760,710 730,712 Q700,710 680,690 Z" fill="url(#dinoBody)" stroke="#1a3a10" stroke-width="2.5"/>
+  <!-- 嘴 -->
+  <path d="M760,660 Q790,665 800,680 Q785,682 760,672 Z" fill="#1a2a10"/>
+  <!-- 牙齿 -->
+  <path d="M766,668 L770,678 L774,668" fill="#fff"/>
+  <path d="M778,670 L782,680 L786,670" fill="#fff"/>
+  <!-- 眼睛 -->
+  <circle cx="725" cy="645" r="7" fill="#fff"/>
+  <circle cx="727" cy="645" r="4" fill="#1a1a1a"/>
+  <circle cx="728" cy="643" r="1.5" fill="#fff"/>
+  <!-- 鼻孔 -->
+  <circle cx="782" cy="650" r="2" fill="#1a2a10"/>
+</g>
+
+<!-- ============ 巨型竹节虫 站在恐龙头上 ============ -->
+<g transform="translate(720,600)">
+  <!-- 身体节段 -->
+  <ellipse cx="0" cy="0" rx="14" ry="40" fill="#5a6a3a" stroke="#2a3a1a" stroke-width="1.5" transform="rotate(-10)"/>
+  <ellipse cx="-2" cy="-42" rx="12" ry="32" fill="#6a7a4a" stroke="#2a3a1a" stroke-width="1.5" transform="rotate(-10)"/>
+  <ellipse cx="-4" cy="-78" rx="10" ry="26" fill="#5a6a3a" stroke="#2a3a1a" stroke-width="1.5" transform="rotate(-10)"/>
+  <!-- 头 -->
+  <ellipse cx="-6" cy="-110" rx="9" ry="12" fill="#6a7a4a" stroke="#2a3a1a" stroke-width="1.5" transform="rotate(-10)"/>
+  <!-- 触角 -->
+  <path d="M-10,-118 Q-25,-140 -20,-158" fill="none" stroke="#2a3a1a" stroke-width="1.5"/>
+  <path d="M-2,-120 Q5,-145 15,-160" fill="none" stroke="#2a3a1a" stroke-width="1.5"/>
+  <!-- 眼睛 -->
+  <circle cx="-10" cy="-112" r="2.5" fill="#ff4040"/>
+  <circle cx="-2" cy="-112" r="2.5" fill="#ff4040"/>
+  <!-- 腿 (六条) -->
+  <path d="M-10,-20 Q-40,-10 -55,5" fill="none" stroke="#3a4a2a" stroke-width="2.5"/>
+  <path d="M-12,0 Q-45,15 -60,30" fill="none" stroke="#3a4a2a" stroke-width="2.5"/>
+  <path d="M-8,20 Q-38,40 -52,55" fill="none" stroke="#3a4a2a" stroke-width="2.5"/>
+  <path d="M8,-20 Q38,-8 52,8" fill="none" stroke="#3a4a2a" stroke-width="2.5"/>
+  <path d="M10,0 Q42,18 58,32" fill="none" stroke="#3a4a2a" stroke-width="2.5"/>
+  <path d="M6,20 Q36,42 50,58" fill="none" stroke="#3a4a2a" stroke-width="2.5"/>
+  <!-- 竹节纹理 -->
+  <line x1="-4" y1="-30" x2="-4" y2="30" stroke="#2a3a1a" stroke-width="1" opacity="0.5"/>
+</g>
+
+<!-- ============ 原子弹 从竹节虫头顶发射 ============ -->
+<g transform="translate(706,430)">
+  <!-- 发射光焰 -->
+  <ellipse cx="0" cy="80" rx="30" ry="60" fill="url(#bombGlow)" filter="url(#softGlow)"/>
+  <!-- 烟雾尾迹 -->
+  <path d="M-12,70 Q-20,120 -8,170 Q4,200 14,240 Q22,270 8,310" fill="none" stroke="#888" stroke-width="14" opacity="0.4" stroke-linecap="round"/>
+  <path d="M-6,70 Q-12,120 2,165 Q10,200 18,235 Q24,265 14,300" fill="none" stroke="#bbb" stroke-width="8" opacity="0.5" stroke-linecap="round"/>
+  <!-- 原子弹主体 -->
+  <ellipse cx="0" cy="0" rx="22" ry="34" fill="#3a4048" stroke="#1a1e22" stroke-width="2"/>
+  <ellipse cx="0" cy="-6" rx="14" ry="22" fill="#5a6068"/>
+  <circle cx="0" cy="-28" r="10" fill="#2a2e34" stroke="#1a1e22" stroke-width="1.5"/>
+  <!-- 弹头尖端 -->
+  <path d="M-6,-34 L0,-46 L6,-34 Z" fill="#c0c4cc"/>
+  <!-- 尾翼 -->
+  <path d="M-18,20 L-30,40 L-12,28 Z" fill="#4a5058" stroke="#1a1e22" stroke-width="1"/>
+  <path d="M18,20 L30,40 L12,28 Z" fill="#4a5058" stroke="#1a1e22" stroke-width="1"/>
+  <!-- 辐射标志 -->
+  <circle cx="0" cy="0" r="8" fill="none" stroke="#ffd23f" stroke-width="1.5"/>
+  <path d="M0,-8 L0,0 M7,4 L0,0 M-7,4 L0,0" stroke="#ffd23f" stroke-width="1.5"/>
+  <circle cx="0" cy="0" r="2" fill="#ffd23f"/>
+</g>
+
+<!-- 原子弹爆炸远景蘑菇云暗示 -->
+<g transform="translate(706,200)" opacity="0.5">
+  <ellipse cx="0" cy="0" rx="50" ry="30" fill="#ffd27a" filter="url(#softGlow)"/>
+  <ellipse cx="0" cy="-10" rx="35" ry="22" fill="#fff4c0"/>
+</g>
+
+<!-- ============ 悬空黄金椅子 ============ -->
+<g transform="translate(1100,430)" filter="url(#dropShadow)">
+  <!-- 光晕 -->
+  <ellipse cx="40" cy="20" rx="180" ry="120" fill="#ffd23f" opacity="0.18" filter="url(#bigGlow)"/>
+  <!-- 椅背 -->
+  <path d="M-10,20 Q-30,-90 30,-100 Q90,-105 95,-20 Q98,40 60,50 L30,50 Q-5,50 -10,20 Z" fill="url(#goldChair)" stroke="#7a5208" stroke-width="3"/>
+  <!-- 椅背顶部装饰 -->
+  <path d="M30,-100 Q60,-120 95,-100" fill="none" stroke="#7a5208" stroke-width="4"/>
+  <circle cx="62" cy="-112" r="10" fill="url(#goldChair)" stroke="#7a5208" stroke-width="2"/>
+  <circle cx="62" cy="-112" r="4" fill="#fff4a0"/>
+  <!-- 椅背雕花 -->
+  <path d="M40,-80 Q60,-70 80,-82" fill="none" stroke="#a9740f" stroke-width="2"/>
+  <path d="M35,-50 Q60,-38 85,-52" fill="none" stroke="#a9740f" stroke-width="2"/>
+  <!-- 椅座 -->
+  <path d="M-10,20 L130,20 L140,55 L-20,55 Z" fill="url(#goldChair)" stroke="#7a5208" stroke-width="3"/>
+  <!-- 椅座前缘 -->
+  <path d="M-20,55 Q60,70 140,55" fill="none" stroke="#7a5208" stroke-width="4"/>
+  <!-- 扶手 -->
+  <path d="M-10,20 Q-30,-10 10,0 L-5,25 Z" fill="url(#goldChairShade)" stroke="#7a5208" stroke-width="2"/>
+  <path d="M95,0 Q120,-10 130,20 L115,25 Z" fill="url(#goldChairShade)" stroke="#7a5208" stroke-width="2"/>
+  <!-- 椅腿（悬空，短） -->
+  <path d="M0,55 L-5,90 L10,92 L18,58 Z" fill="url(#goldChairShade)" stroke="#7a5208" stroke-width="2"/>
+  <path d="M120,55 L125,92 L140,90 L138,58 Z" fill="url(#goldChairShade)" stroke="#7a5208" stroke-width="2"/>
+  <!-- 金色高光 -->
+  <path d="M30,-95 Q50,-92 85,-25" fill="none" stroke="#fff4a0" stroke-width="2" opacity="0.7"/>
+  <path d="M-5,25 L135,25" fill="none" stroke="#fff4a0" stroke-width="1.5" opacity="0.5"/>
+</g>
+
+<!-- ============ 奥特曼 瘫坐在椅子上 ============ -->
+<g transform="translate(1110,370)">
+  <!-- 双腿向前伸 -->
+  <path d="M-5,30 Q-25,50 -40,65 Q-48,70 -42,78 Q-30,76 -18,60 Q-5,42 5,30 Z" fill="url(#ultraBody)" stroke="#2a3a5a" stroke-width="2"/>
+  <path d="M10,30 Q-5,55 -20,72 Q-26,78 -18,84 Q-6,80 0,68 Q12,50 22,30 Z" fill="url(#ultraBody)" stroke="#2a3a5a" stroke-width="2"/>
+  <!-- 脚 -->
+  <ellipse cx="-44" cy="76" rx="12" ry="6" fill="#c03030" stroke="#2a3a5a" stroke-width="1.5"/>
+  <ellipse cx="-24" cy="82" rx="12" ry="6" fill="#c03030" stroke="#2a3a5a" stroke-width="1.5"/>
+  <!-- 身体（瘫坐前倾） -->
+  <path d="M-20,-10 Q-30,30 -5,35 Q20,38 30,20 Q38,-5 20,-20 Q-10,-25 -20,-10 Z" fill="url(#ultraRed)" stroke="#5a0a0a" stroke-width="2"/>
+  <!-- 银色胸甲花纹 -->
+  <path d="M-10,0 Q5,8 20,0" fill="none" stroke="#d8e8ff" stroke-width="2.5"/>
+  <path d="M-8,12 Q5,18 18,12" fill="none" stroke="#d8e8ff" stroke-width="2"/>
+  <!-- 手臂垂落 -->
+  <path d="M-18,0 Q-35,15 -32,40 Q-25,48 -18,42 Q-12,22 -12,2 Z" fill="url(#ultraRed)" stroke="#5a0a0a" stroke-width="2"/>
+  <path d="M22,2 Q30,22 38,40 Q42,48 35,46 Q28,30 28,6 Z" fill="url(#ultraRed)" stroke="#5a0a0a" stroke-width="2"/>
+  <!-- 手 -->
+  <circle cx="-30" cy="42" r="6" fill="#d8e8ff" stroke="#2a3a5a" stroke-width="1.5"/>
+  <circle cx="36" cy="46" r="6" fill="#d8e8ff" stroke="#2a3a5a" stroke-width="1.5"/>
+  <!-- 头部（歪斜） -->
+  <g transform="translate(5,-30) rotate(-15)">
+    <ellipse cx="0" cy="0" rx="22" ry="26" fill="#d8e8ff" stroke="#2a3a5a" stroke-width="2"/>
+    <!-- 头顶冠 -->
+    <path d="M-10,-24 L0,-40 L10,-24 Z" fill="#d8e8ff" stroke="#2a3a5a" stroke-width="2"/>
+    <!-- 眼睛（疲惫半闭） -->
+    <ellipse cx="-9" cy="-4" rx="6" ry="3" fill="#ffe14a" stroke="#5a4a00" stroke-width="1"/>
+    <ellipse cx="9" cy="-4" rx="6" ry="3" fill="#ffe14a" stroke="#5a4a00" stroke-width="1"/>
+    <path d="M-14,-4 L-4,-4" stroke="#5a4a00" stroke-width="1.5"/>
+    <path d="M4,-4 L14,-4" stroke="#5a4a00" stroke-width="1.5"/>
+    <!-- 红色脸部花纹 -->
+    <path d="M-16,4 Q-8,14 0,10 Q8,14 16,4 Q10,20 0,18 Q-10,20 -16,4 Z" fill="#c03030" stroke="#5a0a0a" stroke-width="1.5"/>
+    <!-- 嘴 -->
+    <path d="M-6,16 Q0,20 6,16" fill="none" stroke="#5a0a0a" stroke-width="1.5"/>
+  </g>
+  <!-- 胸口彩色计时器（闪红 = 能量耗尽） -->
+  <circle cx="3" cy="10" r="5" fill="#ff2020" stroke="#fff" stroke-width="1.5" filter="url(#softGlow)"/>
+</g>
+
+<!-- 椅子下方浮云 -->
+<g transform="translate(1100,560)" opacity="0.5">
+  <ellipse cx="0" cy="0" rx="120" ry="22" fill="#e8eef8"/>
+  <ellipse cx="-40" cy="-8" rx="60" ry="16" fill="#e8eef8"/>
+  <ellipse cx="50" cy="-6" rx="70" ry="18" fill="#e8eef8"/>
+</g>
