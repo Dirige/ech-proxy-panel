@@ -216,8 +216,12 @@ func saveConfig(filePath string) error {
 	return os.WriteFile(filePath, data, 0600)
 }
 
+// appVersion 面板与镜像版本号（发版时同步改这里 + workflow tag）
+const appVersion = "1.0"
+
 // statusResponse 状态响应
 type statusResponse struct {
+	Version      string  `json:"version"`
 	Uptime       string  `json:"uptime"`
 	TotalConns   int64   `json:"total_conns"`
 	ActiveConns  int     `json:"active_conns"`
@@ -1394,6 +1398,7 @@ var loginHTML = `<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>ECH Proxy Control - 登录</title>
+<link rel="icon" href="data:,">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Syne:wght@600;700;800&family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
@@ -1548,6 +1553,7 @@ func handleStatus(w http.ResponseWriter, r *http.Request) {
 	customRulesCount := len(customRules)
 	customRulesMu.RUnlock()
 	json.NewEncoder(w).Encode(statusResponse{
+		Version:       appVersion,
 		Uptime:        time.Since(startTime).Truncate(time.Second).String(),
 		TotalConns:    totalConns.Load(),
 		ActiveConns:   int(activeConnCnt.Load()),

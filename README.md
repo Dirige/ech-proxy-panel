@@ -7,6 +7,7 @@
   <img src="https://img.shields.io/badge/routing-bypass_cn-blue" alt="routing" />
   <img src="https://img.shields.io/badge/listen-0.0.0.0%3A30000-lightgrey" alt="listen" />
   <img src="https://img.shields.io/badge/panel-%3A9090-orange" alt="panel" />
+  <img src="https://img.shields.io/badge/version-v1.0-blue" alt="version" />
   <a href="https://github.com/Dirige/ech-proxy-panel/pkgs/container/ech-proxy-panel"><img src="https://img.shields.io/badge/ghcr.io-ech--proxy--panel-blue?logo=docker" alt="docker" /></a>
 </p>
 
