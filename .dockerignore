@@ -1,8 +1,0 @@
-.git
-.github
-*.md
-config.json
-rules_data.txt
-ech-workers
-ech-workers-*
-*.log
