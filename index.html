@@ -328,7 +328,7 @@ body::after{
   <div class="sidebar-footer">
     <span class="status-dot"></span>
     <span>运行中</span>
-    <span class="mono" id="app-version" style="opacity:.55" title="面板版本">v1.1</span>
+    <span class="mono" id="app-version" style="opacity:.55" title="面板版本">v1.2</span>
   </div>
 </div>
 
@@ -574,7 +574,7 @@ async function loadOverview(){
   document.getElementById('ov-total-up').textContent=fmtBytes(status.total_upload);
   document.getElementById('ov-total-down').textContent=fmtBytes(status.total_download);
   document.getElementById('ov-mem').textContent=status.memory_mb.toFixed(1)+' MB';
-  document.getElementById('app-version').textContent='v'+(status.version||'1.1');
+  document.getElementById('app-version').textContent='v'+(status.version||'1.2');
   const logEl=document.getElementById('ov-logs');
   if(!logs||logs.length===0){logEl.innerHTML='<div class="empty">暂无日志</div>';return}
   logEl.innerHTML=logs.map(l=>{const cls=l.level==='error'?'level-error':l.level==='warn'?'level-warn':'level-info';return`<div class="log-line"><span class="time">${l.time}</span> <span class="${cls}">[${l.level}]</span> ${escHtml(l.msg)}</div>`}).join('');

@@ -35,6 +35,7 @@ jobs:
           tags: |
             type=raw,value=latest
             type=raw,value=1.1
+            type=raw,value=1.2
             type=sha,prefix=
 
       - name: Build and push

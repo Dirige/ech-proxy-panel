@@ -205,7 +205,13 @@ func saveConfig(filePath string) error {
 }
 
 // appVersion 面板与镜像版本号（发版时同步改这里 + workflow tag）
-const appVersion = "1.1"
+const appVersion = "1.2"
+
+// validHostPort 校验 host:port 格式（:9090、0.0.0.0:30000、example.com:443 均合法）
+func validHostPort(s string) bool {
+	_, port, err := net.SplitHostPort(s)
+	return err == nil && port != ""
+}
 
 // statusResponse 状态响应
 type statusResponse struct {
@@ -411,7 +417,11 @@ func main() {
 	// 初始化 web 会话管理
 	webSessions = make(map[string]time.Time)
 
-	// 启动 Web 管理面板
+	// 启动 Web 管理面板（地址非法时回退 :9090，避免面板静默死亡）
+	if webAddr != "" && !validHostPort(webAddr) {
+		log.Printf("[警告] web_addr 无效 (%s)，回退为 :9090", webAddr)
+		webAddr = ":9090"
+	}
 	if webAddr != "" {
 		go startWebServer(webAddr)
 	}
@@ -1457,6 +1467,28 @@ func handleConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 校验地址类字段：非法值直接拒绝，避免写坏配置导致面板/代理无法启动
+	if v, ok := update["listen_addr"]; ok && v != "" && !validHostPort(v) {
+		json.NewEncoder(w).Encode(map[string]string{"error": "listen_addr 非法，需要 host:port 格式，例如 0.0.0.0:30000"})
+		return
+	}
+	if v, ok := update["server_addr"]; ok && v != "" && !validHostPort(v) {
+		json.NewEncoder(w).Encode(map[string]string{"error": "server_addr 非法，需要 host:port 格式，例如 xxx.workers.dev:443"})
+		return
+	}
+	if v, ok := update["web_addr"]; ok && v != "" && !validHostPort(v) {
+		json.NewEncoder(w).Encode(map[string]string{"error": "web_addr 非法，需要 host:port 格式，例如 :9090"})
+		return
+	}
+	if v, ok := update["dns_server"]; ok && v == "" {
+		json.NewEncoder(w).Encode(map[string]string{"error": "dns_server 不能为空"})
+		return
+	}
+	if v, ok := update["ech_domain"]; ok && v == "" {
+		json.NewEncoder(w).Encode(map[string]string{"error": "ech_domain 不能为空"})
+		return
+	}
+
 	if v, ok := update["listen_addr"]; ok && v != "" {
 		listenAddr = v
 	}
@@ -1469,10 +1501,10 @@ func handleConfig(w http.ResponseWriter, r *http.Request) {
 	if v, ok := update["token"]; ok && v != "" {
 		token = v
 	}
-	if v, ok := update["dns_server"]; ok {
+	if v, ok := update["dns_server"]; ok && v != "" {
 		dnsServer = v
 	}
-	if v, ok := update["ech_domain"]; ok {
+	if v, ok := update["ech_domain"]; ok && v != "" {
 		echDomain = v
 	}
 	if v, ok := update["proxy_ip"]; ok {
@@ -1690,51 +1722,101 @@ func detectExitInfo() {
 	proxyURL, _ := url.Parse(localProxy)
 
 	client := &http.Client{
-		Timeout: 15 * time.Second,
+		Timeout: 10 * time.Second,
 		Transport: &http.Transport{
 			Proxy: http.ProxyURL(proxyURL),
 		},
 	}
 
-	// 检测出口 IP
+	// 检测出口 IP（多源轮询，任一成功即可）
 	exitIP := ""
-	resp, err := client.Get("https://api.ipify.org?format=json")
-	if err != nil {
-		log.Printf("[检测] 获取出口IP失败: %v", err)
-	} else {
-		defer resp.Body.Close()
-		body, _ := io.ReadAll(resp.Body)
-		var ipResp struct{ IP string `json:"ip"` }
-		if json.Unmarshal(body, &ipResp) == nil {
-			exitIP = ipResp.IP
+	ipSources := []string{
+		"https://api.ipify.org?format=json",
+		"https://ifconfig.me/ip",
+		"https://api.ip.sb/ip",
+	}
+	for _, src := range ipSources {
+		if ip := fetchExitIP(client, src); ip != "" {
+			exitIP = ip
+			break
 		}
 	}
+	if exitIP == "" {
+		log.Printf("[检测] 获取出口IP失败（已试 %d 个源）", len(ipSources))
+	}
 
-	// 检测 COLO（通过 Cloudflare trace）
+	// 检测 COLO（多源 Cloudflare trace，任一成功即可）
 	colo := ""
-	resp2, err := client.Get("https://1.1.1.1/cdn-cgi/trace")
-	if err == nil {
-		defer resp2.Body.Close()
-		body, _ := io.ReadAll(resp2.Body)
-		traceStr := string(body)
-		if idx := strings.Index(traceStr, "colo="); idx >= 0 {
-			start := idx + 5
-			end := start
-			for end < len(traceStr) && traceStr[end] != '\r' && traceStr[end] != '\n' {
-				end++
-			}
-			colo = traceStr[start:end]
+	coloSources := []string{
+		"https://1.1.1.1/cdn-cgi/trace",
+		"https://www.cloudflare.com/cdn-cgi/trace",
+		"https://cloudflare.com/cdn-cgi/trace",
+	}
+	for _, src := range coloSources {
+		if c := fetchCOLO(client, src); c != "" {
+			colo = c
+			break
 		}
 	}
 
+	// 只在成功时更新缓存：失败不擦除上次的结果
 	exitInfoMu.Lock()
-	cachedExitIP = exitIP
-	cachedCOLO = colo
+	if exitIP != "" {
+		cachedExitIP = exitIP
+	}
+	if colo != "" {
+		cachedCOLO = colo
+	}
 	exitInfoMu.Unlock()
 
 	if exitIP != "" {
 		log.Printf("[检测] 出口IP: %s, COLO: %s", exitIP, colo)
 	}
+}
+
+// fetchExitIP 从单个源获取出口 IP（JSON 或纯文本），失败返回 ""
+func fetchExitIP(client *http.Client, url string) string {
+	resp, err := client.Get(url)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return ""
+	}
+	body, _ := io.ReadAll(resp.Body)
+	// 先按 JSON 解析（ipify），失败则按纯文本处理，结果必须是合法 IP
+	var ipResp struct{ IP string `json:"ip"` }
+	if json.Unmarshal(body, &ipResp) == nil && net.ParseIP(strings.TrimSpace(ipResp.IP)) != nil {
+		return strings.TrimSpace(ipResp.IP)
+	}
+	if ip := net.ParseIP(strings.TrimSpace(string(body))); ip != nil {
+		return ip.String()
+	}
+	return ""
+}
+
+// fetchCOLO 从单个 Cloudflare trace 源解析 colo，失败返回 ""
+func fetchCOLO(client *http.Client, url string) string {
+	resp, err := client.Get(url)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return ""
+	}
+	body, _ := io.ReadAll(resp.Body)
+	traceStr := string(body)
+	if idx := strings.Index(traceStr, "colo="); idx >= 0 {
+		start := idx + 5
+		end := start
+		for end < len(traceStr) && traceStr[end] != '\r' && traceStr[end] != '\n' {
+			end++
+		}
+		return traceStr[start:end]
+	}
+	return ""
 }
 
 // handleExitInfo 返回缓存的出口信息
