@@ -118,6 +118,10 @@ var (
 	panelRules    []customRule
 	customRulesMu sync.RWMutex
 
+	// CF 网段用户增减量：生效集 = 内置快照 ∪ cfipAdd − cfipDel（存 config.json）
+	cfipAdd []string
+	cfipDel []string
+
 	// DNS 解析结果缓存（bypass_cn 模式下避免重复查询）
 	dnsCache   map[string]dnsCacheEntry
 	dnsCacheMu sync.RWMutex
@@ -196,6 +200,8 @@ type appConfig struct {
 	WebPassword string `json:"web_password"`
 	Upstream    string `json:"upstream"`
 	Fallback    string `json:"fallback"`
+	CfipAdd     []string `json:"cfip_add"`
+	CfipDel     []string `json:"cfip_del"`
 }
 
 // loadConfig 从文件加载配置
@@ -226,6 +232,8 @@ func saveConfig(filePath string) error {
 		WebPassword: webPassword,
 		Upstream:    upstreamRaw,
 		Fallback:    fallbackSwitchRaw,
+		CfipAdd:     cfipAdd,
+		CfipDel:     cfipDel,
 	}
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
@@ -242,7 +250,7 @@ func saveConfig(filePath string) error {
 // appVersion 面板与镜像版本号（发版时同步改这里 + workflow tag）
 const appVersion = "1.2"
 
-// validHostPort 校验 host:port 格式（:9090、0.0.0.0:30000、example.com:443 均合法）
+// validHostPort 校验 host:port 格式（:30001、0.0.0.0:30000、example.com:443 均合法）
 func validHostPort(s string) bool {
 	_, port, err := net.SplitHostPort(s)
 	return err == nil && port != ""
@@ -273,7 +281,7 @@ func init() {
 	flag.StringVar(&dnsServer, "dns", "dns.alidns.com/dns-query", "ECH 查询 DoH 服务器")
 	flag.StringVar(&echDomain, "ech", "cloudflare-ech.com", "ECH 查询域名")
 	flag.StringVar(&routingMode, "routing", "bypass_cn", "分流模式: global(全局代理), bypass_cn(跳过中国大陆), none(不改变代理), custom(自定义规则)")
-	flag.StringVar(&webAddr, "web", "", "Web 管理面板监听地址 (如 :9090)")
+	flag.StringVar(&webAddr, "web", "", "Web 管理面板监听地址 (如 :30001)")
 	flag.StringVar(&rulesFile, "rules", "", "自定义规则文件路径 (routing=custom 时必需)")
 	flag.StringVar(&rulesData, "rules-data", "/data/rules.json", "面板规则持久化文件路径")
 	flag.StringVar(&configFile, "config", "/data/config.json", "配置文件路径")
@@ -775,6 +783,12 @@ func main() {
 		if fallbackSwitchRaw == "on" && cfg.Fallback != "" {
 			fallbackSwitchRaw = cfg.Fallback
 		}
+		if cfg.CfipAdd != nil {
+			cfipAdd = cfg.CfipAdd
+		}
+		if cfg.CfipDel != nil {
+			cfipDel = cfg.CfipDel
+		}
 	} else if configFile != "" {
 		log.Printf("[启动] 配置文件不存在或无效，使用命令行参数")
 	}
@@ -790,13 +804,14 @@ func main() {
 		}
 	}
 
-	// 配置文件里的上游/兜底开关在 parseFallbackOptions 之后加载，需重新解析一次使其生效
+	// 配置文件里的上游/兜底开关/CF增减量在解析之后加载，需重新应用一次使其生效
 	parseFallbackOptions()
+	rebuildCFNets()
 
-	// 面板默认监听 :9090（可用 -web / ECH_WEB / 配置文件 web_addr 覆盖）
+	// 面板默认监听 :30001（可用 -web / ECH_WEB / 配置文件 web_addr 覆盖）
 	if webAddr == "" {
-		webAddr = ":9090"
-		log.Printf("[启动] 未指定面板地址，默认监听 :9090")
+		webAddr = ":30001"
+		log.Printf("[启动] 未指定面板地址，默认监听 :30001")
 	}
 
 	if serverAddr == "" {
@@ -876,10 +891,10 @@ func main() {
 	// 初始化 web 会话管理
 	webSessions = make(map[string]time.Time)
 
-	// 启动 Web 管理面板（地址非法时回退 :9090，避免面板静默死亡）
+	// 启动 Web 管理面板（地址非法时回退 :30001，避免面板静默死亡）
 	if webAddr != "" && !validHostPort(webAddr) {
-		log.Printf("[警告] web_addr 无效 (%s)，回退为 :9090", webAddr)
-		webAddr = ":9090"
+		log.Printf("[警告] web_addr 无效 (%s)，回退为 :30001", webAddr)
+		webAddr = ":30001"
 	}
 	if webAddr != "" {
 		go startWebServer(webAddr)
@@ -1467,9 +1482,57 @@ func mustParseCIDRs(cidrs []string) []*net.IPNet {
 	return nets
 }
 
-// isCloudflareIP 判断 IP 是否落在内置 Cloudflare 段内
-func isCloudflareIP(ip net.IP) bool {
+// cfEffectiveNets 生效 CF 网段 = 内置快照 ∪ 用户新增 − 用户删除
+var (
+	cfEffectiveNets []*net.IPNet
+	cfEffectiveMu   sync.RWMutex
+)
+
+// rebuildCFNets 重建生效 CF 网段（启动加载配置后与 /api/cfips 变更时调用）
+func rebuildCFNets() {
+	del := make(map[string]bool, len(cfipDel))
+	for _, c := range cfipDel {
+		if _, n, err := net.ParseCIDR(strings.TrimSpace(c)); err == nil {
+			del[n.String()] = true
+		}
+	}
+	seen := make(map[string]bool)
+	var out []*net.IPNet
 	for _, n := range cfIPNets {
+		if !del[n.String()] {
+			out = append(out, n)
+			seen[n.String()] = true
+		}
+	}
+	for _, c := range cfipAdd {
+		if _, n, err := net.ParseCIDR(strings.TrimSpace(c)); err == nil && !seen[n.String()] {
+			out = append(out, n)
+			seen[n.String()] = true
+		}
+	}
+	cfEffectiveMu.Lock()
+	cfEffectiveNets = out
+	cfEffectiveMu.Unlock()
+}
+
+// cfStrs 网段列表转字符串（面板展示用）
+func cfStrs(nets []*net.IPNet) []string {
+	out := make([]string, 0, len(nets))
+	for _, n := range nets {
+		out = append(out, n.String())
+	}
+	return out
+}
+
+// isCloudflareIP 判断 IP 是否落在生效 CF 段内
+func isCloudflareIP(ip net.IP) bool {
+	cfEffectiveMu.RLock()
+	nets := cfEffectiveNets
+	cfEffectiveMu.RUnlock()
+	if nets == nil {
+		nets = cfIPNets
+	}
+	for _, n := range nets {
 		if n.Contains(ip) {
 			return true
 		}
@@ -1857,7 +1920,8 @@ func startWebServer(addr string) {
 	mux.Handle("/api/traffic", authMiddleware(http.HandlerFunc(handleTraffic)))
 	mux.Handle("/api/logs", authMiddleware(http.HandlerFunc(handleLogs)))
 	mux.Handle("/api/service/", authMiddleware(http.HandlerFunc(handleService)))
-	mux.Handle("/api/exit-info", authMiddleware(http.HandlerFunc(handleExitInfo)))
+		mux.Handle("/api/exit-info", authMiddleware(http.HandlerFunc(handleExitInfo)))
+		mux.Handle("/api/cfips", authMiddleware(http.HandlerFunc(handleCFIPs)))
 	mux.Handle("/ws", authMiddleware(http.HandlerFunc(handleWebSocket)))
 
 	log.Printf("[Web] 管理面板启动: http://%s", addr)
@@ -2073,7 +2137,7 @@ func handleConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if v, ok := update["web_addr"]; ok && v != "" && !validHostPort(v) {
-		json.NewEncoder(w).Encode(map[string]string{"error": "web_addr 非法，需要 host:port 格式，例如 :9090"})
+		json.NewEncoder(w).Encode(map[string]string{"error": "web_addr 非法，需要 host:port 格式，例如 :30001"})
 		return
 	}
 	if v, ok := update["dns_server"]; ok && v == "" {
@@ -2220,6 +2284,90 @@ func handleRules(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
+// handleCFIPs 管理生效 CF 网段：GET 返回内置快照/增减量/生效集；POST 更新增减量并持久化
+func handleCFIPs(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if r.Method == "GET" {
+		cfEffectiveMu.RLock()
+		eff := cfStrs(cfEffectiveNets)
+		if eff == nil {
+			eff = cfStrs(cfIPNets)
+		}
+		cfEffectiveMu.RUnlock()
+		add := append([]string{}, cfipAdd...)
+		del := append([]string{}, cfipDel...)
+		if add == nil {
+			add = []string{}
+		}
+		if del == nil {
+			del = []string{}
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"builtin":   cfStrs(cfIPNets),
+			"add":       add,
+			"del":       del,
+			"effective": eff,
+		})
+		return
+	}
+	if r.Method != "POST" {
+		http.Error(w, `{"error":"method not allowed"}`, 405)
+		return
+	}
+	var body struct {
+		Add []string `json:"add"`
+		Del []string `json:"del"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, `{"error":"invalid json"}`, 400)
+		return
+	}
+	norm := func(list []string) ([]string, error) {
+		seen := map[string]bool{}
+		out := []string{}
+		for _, c := range list {
+			_, n, err := net.ParseCIDR(strings.TrimSpace(c))
+			if err != nil {
+				return nil, fmt.Errorf("网段格式无效: %s", c)
+			}
+			if !seen[n.String()] {
+				seen[n.String()] = true
+				out = append(out, n.String())
+			}
+		}
+		return out, nil
+	}
+	add, err := norm(body.Add)
+	if err != nil {
+		http.Error(w, `{"error":"`+err.Error()+`"}`, 400)
+		return
+	}
+	del, err := norm(body.Del)
+	if err != nil {
+		http.Error(w, `{"error":"`+err.Error()+`"}`, 400)
+		return
+	}
+	builtin := map[string]bool{}
+	for _, n := range cfIPNets {
+		builtin[n.String()] = true
+	}
+	for _, c := range del {
+		if !builtin[c] {
+			http.Error(w, `{"error":"只能删除内置快照中的网段: `+c+`"}`, 400)
+			return
+		}
+	}
+	cfipAdd, cfipDel = add, del
+	rebuildCFNets()
+	if err := saveConfig(configFile); err != nil {
+		log.Printf("[规则] 保存 CF 增减量失败: %v", err)
+	}
+	cfEffectiveMu.RLock()
+	eff := cfStrs(cfEffectiveNets)
+	cfEffectiveMu.RUnlock()
+	json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok", "effective": eff})
+}
+
 // handleConnections 获取活跃连接（支持搜索和排序）
 func handleConnections(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
@@ -2344,19 +2492,31 @@ func handleService(w http.ResponseWriter, r *http.Request) {
 var (
 	cachedExitIP   string
 	cachedCOLO     string
+	exitInfoAt     time.Time
 	exitInfoMu     sync.RWMutex
 	exitInfoOnce   sync.Once
+	exitDetecting  atomic.Bool
 )
 
+// exitInfoTTL 出口信息缓存有效期：只在概览页按需检测，平时不产生探测连接
+const exitInfoTTL = 10 * time.Minute
+
 func startExitInfoDetector() {
+	// 仅启动后探测一次供首屏展示；之后只在查看概览页（/api/exit-info）时按需检测
 	go func() {
 		time.Sleep(5 * time.Second)
 		detectExitInfo()
-		for {
-			time.Sleep(60 * time.Second)
-			detectExitInfo()
-		}
 	}()
+}
+
+// triggerExitDetect 触发一次后台检测（防并发：检测中直接返回）
+func triggerExitDetect() {
+	if exitDetecting.CompareAndSwap(false, true) {
+		go func() {
+			defer exitDetecting.Store(false)
+			detectExitInfo()
+		}()
+	}
 }
 
 func detectExitInfo() {
@@ -2412,6 +2572,9 @@ func detectExitInfo() {
 	if colo != "" {
 		cachedCOLO = colo
 	}
+	if exitIP != "" || colo != "" {
+		exitInfoAt = time.Now()
+	}
 	exitInfoMu.Unlock()
 
 	if exitIP != "" {
@@ -2464,14 +2627,24 @@ func fetchCOLO(client *http.Client, url string) string {
 	return ""
 }
 
-// handleExitInfo 返回缓存的出口信息
+// handleExitInfo 返回缓存的出口信息；缓存过期或 ?refresh=1 时触发一次后台检测
 func handleExitInfo(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
+	if r.URL.Query().Get("refresh") == "1" {
+		triggerExitDetect()
+	}
 	exitInfoMu.RLock()
-	defer exitInfoMu.RUnlock()
-	json.NewEncoder(w).Encode(map[string]string{
-		"exit_ip": cachedExitIP,
-		"colo":    cachedCOLO,
+	ip, colo, at := cachedExitIP, cachedCOLO, exitInfoAt
+	exitInfoMu.RUnlock()
+	stale := at.IsZero() || time.Since(at) > exitInfoTTL
+	if stale {
+		triggerExitDetect()
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"exit_ip":    ip,
+		"colo":       colo,
+		"updated_at": at.Unix(),
+		"stale":      stale,
 	})
 }
 

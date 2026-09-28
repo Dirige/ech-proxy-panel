@@ -379,6 +379,7 @@ select.theme-select:focus{outline:none;border-color:var(--cyan)}
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/></svg>
         刷新 ECH 配置
       </button>
+      <button class="btn" onclick="detectExitInfo(true)">重新检测出口</button>
     </div>
 
     <div class="panel">
@@ -505,7 +506,22 @@ select.theme-select:focus{outline:none;border-color:var(--cyan)}
           <tbody id="other-table"></tbody>
         </table>
       </div>
-      <div class="hint" style="margin-top:8px">域名规则在上表三列编辑；IP 段规则对解析后的域名同样生效（按规则顺序匹配）；CF IP 段 = 内置 Cloudflare 网段（value 仅备注）。动作"上游代理"把流量交给 <code>-upstream</code>（Clash 等），拨不通自动回退 ECH。仅"面板规则"可在此编辑，<code>-rules</code> 启动参数加载的规则需改文件后重启。</div>
+      <div class="hint" style="margin-top:8px">域名规则在上表三列编辑；IP 段规则对解析后的域名同样生效（按规则顺序匹配）；CF IP 段按下表生效集匹配（value 仅备注）。动作"上游代理"把流量交给 <code>-upstream</code>（Clash 等），拨不通自动回退 ECH。仅"面板规则"可在此编辑，<code>-rules</code> 启动参数加载的规则需改文件后重启。</div>
+    </div>
+    <div class="rules-col" style="margin-top:16px">
+      <h3><span class="dot" style="background:var(--violet)"></span>CF IP 段管理（内置快照 ± 自定义）</h3>
+      <div class="domain-input">
+        <input id="cfip-input" placeholder="CIDR，如 104.16.0.0/13" onkeydown="if(event.key==='Enter')addCFIP()">
+        <button class="btn btn-sm btn-primary" onclick="addCFIP()">添加</button>
+        <button class="btn btn-sm" onclick="resetCFIPs()">恢复内置快照</button>
+      </div>
+      <div class="table-wrap" style="box-shadow:none">
+        <table class="table">
+          <thead><tr><th>网段</th><th style="width:90px">来源</th><th style="width:50px"></th></tr></thead>
+          <tbody id="cfip-table"></tbody>
+        </table>
+      </div>
+      <div class="hint" style="margin-top:8px">生效集 = 内置快照 ∪ 自定义新增 − 自定义删除；<code>cfip</code> 类型规则按此生效集匹配。修改立即生效并持久化。</div>
     </div>
   </div>
 
@@ -606,7 +622,7 @@ function switchPage(pg){
   localStorage.setItem('ech_page',pg);
   if(pg==='overview')loadOverview();
   else if(pg==='connections'){loadConnections();startConnRefresh()}
-  else{stopConnRefresh();if(pg==='rules')loadRules();else if(pg==='config')loadConfig()}
+  else{stopConnRefresh();if(pg==='rules'){loadRules();loadCFIPs()}else if(pg==='config')loadConfig()}
 }
 document.querySelectorAll('.nav-item').forEach(el=>el.addEventListener('click',()=>switchPage(el.dataset.page)));
 
@@ -621,7 +637,7 @@ function escHtml(s){const d=document.createElement('div');d.textContent=s;return
 // 实时速度由后端通过 WebSocket 推送（rt_upload/rt_download，单位 B/s），前端直接显示
 
 async function detectIP(){try{const r=await fetch('https://api.ipify.org?format=json');const d=await r.json();document.getElementById('ov-ip').textContent=d.ip}catch(e){document.getElementById('ov-ip').textContent='检测失败'}}
-async function detectExitInfo(){try{const r=await fetch('/api/exit-info');const d=await r.json();if(d.error){document.getElementById('ov-exit-ip').textContent='检测失败';document.getElementById('ov-colo').textContent='检测失败';return}document.getElementById('ov-exit-ip').textContent=d.exit_ip||'未知';document.getElementById('ov-colo').textContent=d.colo||'未知'}catch(e){document.getElementById('ov-exit-ip').textContent='检测失败';document.getElementById('ov-colo').textContent='检测失败'}}
+async function detectExitInfo(force){try{const d=await api('/api/exit-info'+(force?'?refresh=1':''));if(d.error)throw 0;const ipEl=document.getElementById('ov-exit-ip'),coloEl=document.getElementById('ov-colo');if(!d.exit_ip){ipEl.textContent='检测中…';coloEl.textContent='检测中…';setTimeout(()=>detectExitInfo(false),3000);return}ipEl.textContent=d.exit_ip;coloEl.textContent=d.colo||'未知';if(d.stale)setTimeout(()=>detectExitInfo(false),8000)}catch(e){document.getElementById('ov-exit-ip').textContent='检测失败';document.getElementById('ov-colo').textContent='检测失败'}}
 
 async function pingOne(url,timeout){const start=performance.now();try{await fetch(url,{mode:'no-cors',cache:'no-store',signal:AbortSignal.timeout(timeout)});return Math.round(performance.now()-start)}catch(e){return-1}}
 async function checkPing(){
@@ -721,6 +737,39 @@ async function saveRules(){
 function refreshRules(){
   if(rulesDirty&&!confirm('规则有未保存的修改，刷新将丢弃这些修改。确定刷新？'))return;
   loadRules()
+}
+let cfipState=null;
+async function loadCFIPs(){try{cfipState=await api('/api/cfips');renderCFIPs()}catch(e){cfipState=null;renderCFIPs()}}
+function renderCFIPs(){
+  const tbody=document.getElementById('cfip-table');
+  if(!cfipState||!cfipState.effective){tbody.innerHTML='<tr><td colspan="3" class="empty">加载失败</td></tr>';return}
+  const addSet=new Set(cfipState.add||[]);
+  if(cfipState.effective.length===0){tbody.innerHTML='<tr><td colspan="3" class="empty">生效集为空，cfip 规则将永不命中</td></tr>';return}
+  tbody.innerHTML=cfipState.effective.map(c=>{const custom=addSet.has(c);return`<tr><td class="mono">${escHtml(c)}</td><td>${custom?'<span class="tag upstream">自定义</span>':'<span class="tag">内置</span>'}</td><td><button class="btn btn-ghost btn-sm" onclick="delCFIP('${escHtml(c)}')">✕</button></td></tr>`}).join('')
+}
+async function addCFIP(){
+  const input=document.getElementById('cfip-input');const v=input.value.trim();
+  if(!v){toast('请输入 CIDR');return}
+  if(!validCidr(v)){toast('格式无效，示例：104.16.0.0/13');return}
+  const add=[...(cfipState?cfipState.add:[]),v],del=cfipState?cfipState.del:[];
+  const r=await api('/api/cfips',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({add,del})});
+  if(r&&r.error){toast('保存失败：'+r.error);return}
+  input.value='';toast('CF 网段已更新');loadCFIPs()
+}
+async function delCFIP(cidr){
+  if(!cfipState)return;
+  let add=cfipState.add||[],del=cfipState.del||[];
+  if(add.includes(cidr))add=add.filter(c=>c!==cidr);
+  else del=[...del,cidr];
+  const r=await api('/api/cfips',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({add,del})});
+  if(r&&r.error){toast('保存失败：'+r.error);return}
+  toast('CF 网段已更新');loadCFIPs()
+}
+async function resetCFIPs(){
+  if(!confirm('清空自定义增删，恢复内置快照？'))return;
+  const r=await api('/api/cfips',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({add:[],del:[]})});
+  if(r&&r.error){toast('保存失败：'+r.error);return}
+  toast('已恢复内置快照');loadCFIPs()
 }
 window.addEventListener('beforeunload',e=>{if(rulesDirty){e.preventDefault();e.returnValue=''}})
 

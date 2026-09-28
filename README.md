@@ -28,12 +28,12 @@
 
 ```bash
 docker run -d --name ech-proxy --restart always \
-  -p 30000:30000 -p 9091:9090 \
+  -p 30000:30000 -p 30001:30001 \
   -v ech-data:/data \
   ghcr.io/dirige/ech-proxy-panel:latest
 ```
 
-首次运行使用内置默认配置（`hhech.nb1tap.kdns.fr:443` / `honghongfree`），打开 `http://你的IP:9091` 管理。
+首次运行使用内置默认配置（`hhech.nb1tap.kdns.fr:443` / `honghongfree`），打开 `http://你的IP:30001` 管理。
 
 ### Docker Compose
 
@@ -47,12 +47,12 @@ docker compose up -d
 
 ```bash
 docker run -d --name ech-proxy --restart always \
-  -p 30000:30000 -p 9091:9090 \
+  -p 30000:30000 -p 30001:30001 \
   -v ech-data:/data \
   ghcr.io/dirige/ech-proxy-panel:latest \
   -f 你的服务地址:443 \
   -token 你的令牌 \
-  -web :9090 \
+  -web :30001 \
   -routing bypass_cn \
   -password 你的管理密码
 ```
@@ -61,12 +61,12 @@ docker run -d --name ech-proxy --restart always \
 
 ```bash
 docker run -d --name ech-proxy --restart always \
-  -p 30000:30000 -p 9091:9090 \
+  -p 30000:30000 -p 30001:30001 \
   -v ech-data:/data \
   -e ECH_SERVER=你的服务地址:443 \
   -e ECH_TOKEN=你的令牌 \
   -e ECH_ROUTING=bypass_cn \
-  -e ECH_WEB=:9090 \
+  -e ECH_WEB=:30001 \
   -e ECH_PASSWORD=你的管理密码 \
   ghcr.io/dirige/ech-proxy-panel:latest
 ```
@@ -77,7 +77,7 @@ docker run -d --name ech-proxy --restart always \
 | `ECH_TOKEN`   | `-token`     | `honghongfree`            | 身份验证令牌         |
 | `ECH_LISTEN`  | `-l`         | `0.0.0.0:30000`           | 代理监听地址         |
 | `ECH_SERVER_IP` | `-ip`      | （自动）                  | 优选 IP / 域名       |
-| `ECH_WEB`     | `-web`       | `:9090`                   | Web 面板监听地址     |
+| `ECH_WEB`     | `-web`       | `:30001`                   | Web 面板监听地址     |
 | `ECH_ROUTING` | `-routing`   | `bypass_cn`               | 分流模式             |
 | `ECH_DNS`     | `-dns`       | `dns.alidns.com/dns-query` | DoH 服务器          |
 | `ECH_DOMAIN`  | `-ech`       | `cloudflare-ech.com`      | ECH 查询域名         |
@@ -101,7 +101,7 @@ docker run -d --name ech-proxy --restart always \
 | `-token` | `ECH_TOKEN` | `honghongfree` | 身份验证令牌 |
 | `-l` | `ECH_LISTEN` | `0.0.0.0:30000` | 代理监听地址 |
 | `-ip` | `ECH_SERVER_IP` | （自动） | 优选 IP / 域名 |
-| `-web` | `ECH_WEB` | （空） | Web 管理面板地址，如 `:9090` |
+| `-web` | `ECH_WEB` | （空） | Web 管理面板地址，如 `:30001` |
 | `-routing` | `ECH_ROUTING` | `bypass_cn` | 分流模式 |
 | `-dns` | `ECH_DNS` | `dns.alidns.com/dns-query` | DoH 服务器 |
 | `-ech` | `ECH_DOMAIN` | `cloudflare-ech.com` | ECH 查询域名 |
@@ -117,13 +117,13 @@ docker run -d --name ech-proxy --restart always \
 ### 代理设置
 
 - 类型：SOCKS5 或 HTTP，地址 `127.0.0.1`，端口 `30000`
-- 面板地址：`http://你的IP:9091`
+- 面板地址：`http://你的IP:30001`
 
 ### 面板页面
 
-- **概览**：实时速度、总流量、活跃连接、内存、出口 IP / 落地节点、延迟，以及实时日志
+- **概览**：实时速度、总流量、活跃连接、内存、出口 IP / 落地节点、延迟，以及实时日志（出口信息只在查看概览时按需检测并缓存 10 分钟，平时不产生探测连接；可点「重新检测出口」手动刷新）
 - **连接**：活跃连接列表，支持搜索、排序、暂停刷新；「规则」列显示直连/代理/上游/兜底，「命中」列显示具体命中依据（如 `规则 domain:example.com → 直连`、`模式 bypass_cn(中国IP) → 直连`）
-- **规则**：编辑面板规则——直连/代理/上游域名三列 + IP 段/CF IP 段/关键词规则表，支持未保存提示，保存即生效
+- **规则**：编辑面板规则——直连/代理/上游域名三列 + IP 段/CF IP 段/关键词规则表 + CF IP 段管理（内置快照可增删），支持未保存提示，保存即生效
 - **配置**：修改服务端、令牌、分流模式等，保存后自动刷新 ECH（监听地址类改动需重启容器）
 
 
@@ -154,7 +154,7 @@ docker run -d --name ech-proxy --restart always \
 | `domain` | `example.com` / `*.example.com` | 同时匹配子域名（`example.com` 匹配 `www.example.com`，两种写法等价） |
 | `ipcidr` | `10.0.0.0/8`、`127.0.0.0/8` | 命中 IP 字面量，也命中解析到该网段的**域名目标**（按规则顺序解析回查） |
 | `keyword` | `tracker` | 主机名包含该子串即命中 |
-| `cfip` | `cfip,,upstream`（值仅备注，可留空） | 目标落在**内置 Cloudflare 网段**（来源 https://www.cloudflare.com/ips/ ，页面标注最后更新 2023-09-28，含 v4 15 段 + v6 7 段）即命中，域名目标先解析再比对 |
+| `cfip` | `cfip,,upstream`（值仅备注，可留空） | 目标落在**生效 CF 网段**（内置 Cloudflare 网段快照，来源 https://www.cloudflare.com/ips/ ，页面标注最后更新 2023-09-28，含 v4 15 段 + v6 7 段；规则页「CF IP 段管理」可增删，生效集 = 内置 ∪ 新增 − 删除）即命中，域名目标先解析再比对 |
 
 动作（即出站方式）：
 
@@ -199,7 +199,7 @@ domain,*.255432.xyz,proxy
 
 **方式一：Web 面板**
 
-打开 `http://你的IP:9091`，在「配置」页面修改后保存。
+打开 `http://你的IP:30001`，在「配置」页面修改后保存。
 
 **方式二：编辑配置文件**
 
