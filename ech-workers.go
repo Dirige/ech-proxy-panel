@@ -780,13 +780,21 @@ func main() {
 		}
 	}
 
+	// 面板默认监听 :9090（可用 -web / ECH_WEB / 配置文件 web_addr 覆盖）
+	if webAddr == "" {
+		webAddr = ":9090"
+		log.Printf("[启动] 未指定面板地址，默认监听 :9090")
+	}
+
 	if serverAddr == "" {
 		log.Fatal("必须指定服务端地址 -f\n\n示例:\n  ./client -l 127.0.0.1:1080 -f your-worker.workers.dev:443 -token your-token")
 	}
 
 	log.Printf("[启动] 正在获取 ECH 配置...")
 	if err := prepareECH(); err != nil {
-		log.Fatalf("[启动] 获取 ECH 配置失败: %v", err)
+		log.Printf("[警告] 获取 ECH 配置失败: %v", err)
+		log.Printf("[警告] 代理仍会启动（直连与面板可用，走 ECH 的连接将失败），后台每 30 秒重试获取 ECH")
+		go retryECHLoop()
 	}
 
 	// 初始化统计
@@ -2548,6 +2556,20 @@ func prepareECH() error {
 func refreshECH() error {
 	log.Printf("[ECH] 刷新配置...")
 	return prepareECH()
+}
+
+// retryECHLoop 后台重试获取 ECH 直到成功（启动时 DoH 不通的自愈，避免容器反复退出）
+func retryECHLoop() {
+	t := time.NewTicker(30 * time.Second)
+	defer t.Stop()
+	for range t.C {
+		if err := refreshECH(); err != nil {
+			log.Printf("[警告] ECH 后台重试失败: %v", err)
+			continue
+		}
+		log.Printf("[启动] ECH 配置后台获取成功")
+		return
+	}
 }
 
 func getECHList() ([]byte, error) {
