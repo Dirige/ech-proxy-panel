@@ -194,6 +194,8 @@ type appConfig struct {
 	WebAddr     string `json:"web_addr"`
 	ProxyIP     string `json:"proxy_ip"`
 	WebPassword string `json:"web_password"`
+	Upstream    string `json:"upstream"`
+	Fallback    string `json:"fallback"`
 }
 
 // loadConfig 从文件加载配置
@@ -222,6 +224,8 @@ func saveConfig(filePath string) error {
 		WebAddr:     webAddr,
 		ProxyIP:     proxyIP,
 		WebPassword: webPassword,
+		Upstream:    upstreamRaw,
+		Fallback:    fallbackSwitchRaw,
 	}
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
@@ -765,6 +769,12 @@ func main() {
 		if webPassword == "" && cfg.WebPassword != "" {
 			webPassword = cfg.WebPassword
 		}
+		if upstreamRaw == "" && cfg.Upstream != "" {
+			upstreamRaw = cfg.Upstream
+		}
+		if fallbackSwitchRaw == "on" && cfg.Fallback != "" {
+			fallbackSwitchRaw = cfg.Fallback
+		}
 	} else if configFile != "" {
 		log.Printf("[启动] 配置文件不存在或无效，使用命令行参数")
 	}
@@ -779,6 +789,9 @@ func main() {
 			}
 		}
 	}
+
+	// 配置文件里的上游/兜底开关在 parseFallbackOptions 之后加载，需重新解析一次使其生效
+	parseFallbackOptions()
 
 	// 面板默认监听 :9090（可用 -web / ECH_WEB / 配置文件 web_addr 覆盖）
 	if webAddr == "" {
@@ -2036,6 +2049,8 @@ func handleConfig(w http.ResponseWriter, r *http.Request) {
 			"rules_file":   rulesFile,
 			"proxy_ip":     proxyIP,
 			"web_password": webPassword,
+			"upstream":     upstreamRaw,
+			"fallback":     fallbackSwitchRaw,
 		}
 		json.NewEncoder(w).Encode(config)
 		return
@@ -2095,6 +2110,25 @@ func handleConfig(w http.ResponseWriter, r *http.Request) {
 	if v, ok := update["web_password"]; ok {
 		webPassword = v
 		log.Printf("[配置] 面板密码已更新")
+	}
+	if v, ok := update["fallback"]; ok && v != "" {
+		fb := strings.ToLower(strings.TrimSpace(v))
+		if fb != "on" && fb != "off" {
+			json.NewEncoder(w).Encode(map[string]string{"error": "fallback 非法，只能是 on/off"})
+			return
+		}
+		fallbackSwitchRaw = fb
+	}
+	if v, ok := update["upstream"]; ok {
+		if strings.TrimSpace(v) != "" {
+			if _, _, _, _, err := parseUpstream(v); err != nil {
+				json.NewEncoder(w).Encode(map[string]string{"error": "upstream 非法: " + err.Error()})
+				return
+			}
+		}
+		upstreamRaw = v
+		parseFallbackOptions()
+		log.Printf("[配置] 上游已更新: %q（兜底 %s）", upstreamRaw, fallbackSwitchRaw)
 	}
 	if v, ok := update["routing_mode"]; ok && v != "" {
 		switch v {
