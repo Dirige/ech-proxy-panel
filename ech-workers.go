@@ -24,6 +24,7 @@ import (
 	"reflect"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -31,6 +32,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"golang.org/x/net/proxy"
 )
 
 //go:embed index.html
@@ -52,6 +54,30 @@ var (
 	configFile  string // 配置文件路径
 	proxyIP     string // 固定出口 IP（格式: ip 或 ip:port）
 	webPassword string // Web 管理面板登录密码（为空则不需登录）
+
+	// ========== 长连接（视频）稳定性相关 ==========
+
+	// ========== 连接老化自愈（到量/到时主动断开重连） ==========
+	// CF 免费节点按 invocation 计资源，单条 WS 隧道搬运越多吞吐越低（老化），
+	// 服务端不可控，只能在阈值处主动断开，由播放器自动重连换一条新的 invocation。
+	recycleBytesRaw    string // 原始参数值（flag/env），由 parseRecycleOptions 解析
+	recycleDurationRaw string
+	recycleSwitchRaw   string
+	recycleBytes       int64         // 单连接累计流量阈值（字节），0 = 关闭
+	recycleDuration    time.Duration // 单连接存活时长阈值，0 = 关闭
+	recycleEnabled     bool          // 老化自愈总开关
+
+	// ========== Clash 上游兜底（ECH 隧道失败时自动改走本地 Clash） ==========
+	// ECH 隧道失败有两个时机：本地拨号连不上服务端、服务端回 ERROR（目标不可达）。
+	// 这两处客户端都还没收到成功握手，此时改用本地 Clash 上游，对客户端完全无感。
+	upstreamRaw       string // 上游地址原始值（flag/env），如 127.0.0.1:7890、socks5://、http://
+	fallbackSwitchRaw string // 兜底总开关原始值
+	upstreamAddr      string // 解析后的上游 host:port，空 = 未配置（兜底不生效）
+	upstreamKind      string // 上游协议: socks5 / http
+	upstreamUser      string // 上游账号（可空）
+	upstreamPass      string
+	upstreamSocks     proxy.Dialer // kind=socks5 时的拨号器
+	fallbackEnabled   bool         // 兜底总开关
 
 	// Web 会话管理
 	webSessions   map[string]time.Time // sessionID -> 过期时间
@@ -85,8 +111,11 @@ var (
 	logBuffer   []logEntry
 	logBufferMu sync.Mutex
 
-	// 自定义规则
+	// 自定义规则（两个来源分桶，互不覆盖：-rules CSV 只读、面板 rules.json 可编辑）
+	// customRules 为生效列表，顺序固定：fileRules 优先，panelRules 其后
 	customRules   []customRule
+	fileRules     []customRule
+	panelRules    []customRule
 	customRulesMu sync.RWMutex
 
 	// DNS 解析结果缓存（bypass_cn 模式下避免重复查询）
@@ -120,6 +149,7 @@ type connInfo struct {
 	Target    string
 	Mode      string
 	Rule      string
+	Matched   string // 命中依据（哪条规则 / 哪个分流模式），面板可观测
 	StartTime time.Time
 	upload    atomic.Int64
 	download  atomic.Int64
@@ -132,6 +162,7 @@ type connInfoResp struct {
 	Target    string    `json:"target"`
 	Mode      string    `json:"mode"`
 	Rule      string    `json:"rule"`
+	Matched   string    `json:"matched"`
 	Upload    int64     `json:"upload"`
 	Download  int64     `json:"download"`
 	StartTime time.Time `json:"start_time"`
@@ -146,9 +177,9 @@ type logEntry struct {
 
 // customRule 自定义规则
 type customRule struct {
-	Type   string `json:"type"`   // domain, ipcidr, keyword
-	Value  string `json:"value"`  // 规则值
-	Action string `json:"action"` // proxy, direct
+	Type   string `json:"type"`   // domain, ipcidr, keyword, cfip
+	Value  string `json:"value"`  // 规则值（cfip 为可选备注，匹配只看内置 CF 段）
+	Action string `json:"action"` // proxy(ECH), direct, upstream(本地 socks/http)
 }
 
 // appConfig 应用配置
@@ -244,6 +275,11 @@ func init() {
 	flag.StringVar(&configFile, "config", "/data/config.json", "配置文件路径")
 	flag.StringVar(&proxyIP, "proxyip", "", "固定出口 IP (如 101.79.165.113 或 101.79.165.113:443)")
 	flag.StringVar(&webPassword, "password", "", "Web 管理面板登录密码 (为空则不需登录)")
+	flag.StringVar(&recycleBytesRaw, "recycle-bytes", "800m", "连接流量回收阈值（如 512m/2g，0=关），达到后主动断开等待播放器重连")
+	flag.StringVar(&recycleDurationRaw, "recycle-duration", "0", "连接存活时长回收阈值（如 30m，0=关），达到后主动断开等待播放器重连")
+	flag.StringVar(&recycleSwitchRaw, "recycle", "on", "老化自愈总开关: on/off")
+	flag.StringVar(&upstreamRaw, "upstream", "", "ECH 隧道失败时的兜底上游 (如 127.0.0.1:7890、socks5://127.0.0.1:7890、http://127.0.0.1:7891，留空=不兜底)")
+	flag.StringVar(&fallbackSwitchRaw, "fallback", "on", "兜底总开关: on/off")
 }
 
 // applyEnvDefaults 从环境变量加载默认值（命令行参数优先）
@@ -286,6 +322,402 @@ func applyEnvDefaults() {
 	if v := os.Getenv("ECH_RULES_DATA"); v != "" && rulesData == "/data/rules.json" {
 		rulesData = v
 	}
+	if v := os.Getenv("ECH_RECYCLE_BYTES"); v != "" && recycleBytesRaw == "800m" {
+		recycleBytesRaw = v
+	}
+	if v := os.Getenv("ECH_RECYCLE_DURATION"); v != "" && recycleDurationRaw == "0" {
+		recycleDurationRaw = v
+	}
+	if v := os.Getenv("ECH_RECYCLE"); v != "" && recycleSwitchRaw == "on" {
+		recycleSwitchRaw = v
+	}
+	if v := os.Getenv("ECH_UPSTREAM"); v != "" && upstreamRaw == "" {
+		upstreamRaw = v
+	}
+	if v := os.Getenv("ECH_FALLBACK"); v != "" && fallbackSwitchRaw == "on" {
+		fallbackSwitchRaw = v
+	}
+}
+
+// parseSize 解析容量字符串：纯数字 = 字节，支持 k/m/g 后缀（1024 进制），允许小数如 0.5g
+func parseSize(s string) (int64, error) {
+	s = strings.TrimSpace(strings.ToLower(s))
+	if s == "" || s == "0" {
+		return 0, nil
+	}
+	mult := int64(1)
+	switch {
+	case strings.HasSuffix(s, "g"):
+		mult = 1024 * 1024 * 1024
+		s = strings.TrimSuffix(s, "g")
+	case strings.HasSuffix(s, "m"):
+		mult = 1024 * 1024
+		s = strings.TrimSuffix(s, "m")
+	case strings.HasSuffix(s, "k"):
+		mult = 1024
+		s = strings.TrimSuffix(s, "k")
+	}
+	f, err := strconv.ParseFloat(s, 64)
+	if err != nil || f < 0 {
+		return 0, errors.New("无效的容量值")
+	}
+	return int64(f * float64(mult)), nil
+}
+
+// parseRecycleOptions 解析老化自愈参数。
+// 软失败策略：任何非法输入只打警告并保持默认值，绝不让服务启动失败。
+func parseRecycleOptions() {
+	v := strings.ToLower(strings.TrimSpace(recycleSwitchRaw))
+	switch v {
+	case "on", "1", "true":
+		recycleEnabled = true
+	case "off", "0", "false":
+		recycleEnabled = false
+	default:
+		log.Printf("[警告] -recycle 值无效 %q，保持默认 on", recycleSwitchRaw)
+		recycleEnabled = true
+	}
+
+	if n, err := parseSize(recycleBytesRaw); err != nil {
+		log.Printf("[警告] -recycle-bytes 值无效 %q，保持默认 800m", recycleBytesRaw)
+		recycleBytes = 800 * 1024 * 1024
+	} else {
+		recycleBytes = n
+	}
+
+	rawDur := strings.TrimSpace(recycleDurationRaw)
+	if rawDur == "" || rawDur == "0" {
+		recycleDuration = 0
+	} else if d, err := time.ParseDuration(rawDur); err != nil || d < 0 {
+		log.Printf("[警告] -recycle-duration 值无效 %q，保持默认 0（关闭）", recycleDurationRaw)
+		recycleDuration = 0
+	} else {
+		recycleDuration = d
+	}
+}
+
+// formatBytes 人类可读的字节数（日志用）
+func formatBytes(b int64) string {
+	const unit = 1024
+	if b < unit {
+		return fmt.Sprintf("%d B", b)
+	}
+	div, exp := int64(unit), 0
+	for n := b / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %ciB", float64(b)/float64(div), "KMGTPE"[exp])
+}
+
+// ======================== Clash 上游兜底 ========================
+
+// parseUpstream 解析 -upstream 参数，返回协议、host:port、账号密码。
+// 软失败：任何非法输入返回错误，由调用方打警告，绝不让服务启动失败。
+func parseUpstream(raw string) (kind, addr, user, pass string, err error) {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return "", "", "", "", errors.New("地址为空")
+	}
+	if !strings.Contains(s, "://") {
+		s = "socks5://" + s // 不带 scheme 默认按 SOCKS5（Clash mixed-port 同时支持 SOCKS5 和 HTTP）
+	}
+	u, err := url.Parse(s)
+	if err != nil {
+		return "", "", "", "", err
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "socks5", "socks5h":
+		kind = "socks5"
+	case "http":
+		kind = "http"
+	case "https":
+		return "", "", "", "", errors.New("暂不支持 https 上游（可改用 http:// 或 socks5://）")
+	default:
+		return "", "", "", "", fmt.Errorf("不支持的协议 %q", u.Scheme)
+	}
+	if u.Host == "" {
+		return "", "", "", "", errors.New("缺少地址")
+	}
+	if _, _, e := net.SplitHostPort(u.Host); e != nil {
+		return "", "", "", "", errors.New("缺少端口（如 127.0.0.1:7890）")
+	}
+	if u.User != nil {
+		user = u.User.Username()
+		pass, _ = u.User.Password()
+	}
+	return kind, u.Host, user, pass, nil
+}
+
+// parseFallbackOptions 解析上游兜底参数。
+// 软失败策略：任何非法输入只打警告并保持默认值，绝不让服务启动失败。
+func parseFallbackOptions() {
+	v := strings.ToLower(strings.TrimSpace(fallbackSwitchRaw))
+	switch v {
+	case "on", "1", "true":
+		fallbackEnabled = true
+	case "off", "0", "false":
+		fallbackEnabled = false
+	default:
+		log.Printf("[警告] -fallback 值无效 %q，保持默认 on", fallbackSwitchRaw)
+		fallbackEnabled = true
+	}
+
+	kind, addr, user, pass, err := parseUpstream(upstreamRaw)
+	if err != nil {
+		if strings.TrimSpace(upstreamRaw) != "" {
+			log.Printf("[警告] -upstream 值无效 %q（%v），不启用兜底", upstreamRaw, err)
+		}
+		return
+	}
+	upstreamKind, upstreamAddr, upstreamUser, upstreamPass = kind, addr, user, pass
+
+	if kind == "socks5" {
+		var auth *proxy.Auth
+		if user != "" {
+			auth = &proxy.Auth{User: user, Password: pass}
+		}
+		d, err := proxy.SOCKS5("tcp", addr, auth, nil)
+		if err != nil {
+			log.Printf("[警告] -upstream 值无效 %q（%v），不启用兜底", upstreamRaw, err)
+			upstreamAddr, upstreamKind = "", ""
+			return
+		}
+		upstreamSocks = d
+	}
+}
+
+// dialUpstream 通过本地上游（Clash）连接目标，整体 15s 超时
+func dialUpstream(target string) (net.Conn, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	switch upstreamKind {
+	case "socks5":
+		if upstreamSocks == nil {
+			return nil, errors.New("上游拨号器未初始化")
+		}
+		if cd, ok := upstreamSocks.(proxy.ContextDialer); ok {
+			return cd.DialContext(ctx, "tcp", target)
+		}
+		// 理论上 SOCKS5 拨号器总是实现 ContextDialer，这里只做保底
+		type res struct {
+			c net.Conn
+			e error
+		}
+		ch := make(chan res, 1)
+		go func() {
+			c, e := upstreamSocks.Dial("tcp", target)
+			ch <- res{c, e}
+		}()
+		select {
+		case r := <-ch:
+			return r.c, r.e
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	case "http":
+		return dialHTTPConnect(ctx, upstreamAddr, target, upstreamUser, upstreamPass)
+	}
+	return nil, errors.New("未配置上游")
+}
+
+// dialHTTPConnect 自写的 HTTP CONNECT 拨号（走 Clash 的 http 端口）
+func dialHTTPConnect(ctx context.Context, upstream, target, user, pass string) (net.Conn, error) {
+	var nd net.Dialer
+	conn, err := nd.DialContext(ctx, "tcp", upstream)
+	if err != nil {
+		return nil, fmt.Errorf("连接上游失败: %w", err)
+	}
+	if dl, ok := ctx.Deadline(); ok {
+		conn.SetDeadline(dl)
+	}
+
+	var req strings.Builder
+	fmt.Fprintf(&req, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n", target, target)
+	if user != "" {
+		cred := base64.StdEncoding.EncodeToString([]byte(user + ":" + pass))
+		fmt.Fprintf(&req, "Proxy-Authorization: Basic %s\r\n", cred)
+	}
+	req.WriteString("Proxy-Connection: keep-alive\r\n\r\n")
+	if _, err := io.WriteString(conn, req.String()); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("发送 CONNECT 失败: %w", err)
+	}
+
+	// 逐字节读到 \r\n\r\n：不能用 bufio，否则隧道首包可能被它的缓冲吞掉
+	var header []byte
+	one := make([]byte, 1)
+	for {
+		n, err := conn.Read(one)
+		if err != nil {
+			conn.Close()
+			return nil, fmt.Errorf("读取上游响应失败: %w", err)
+		}
+		if n == 0 {
+			conn.Close()
+			return nil, errors.New("读取上游响应失败: 连接被关闭")
+		}
+		header = append(header, one[0])
+		if len(header) >= 4 && bytes.Equal(header[len(header)-4:], []byte("\r\n\r\n")) {
+			break
+		}
+		if len(header) > 64*1024 {
+			conn.Close()
+			return nil, errors.New("上游响应头过长")
+		}
+	}
+	conn.SetDeadline(time.Time{})
+
+	line := string(header[:bytes.IndexByte(header, '\r')])
+	fields := strings.Fields(line)
+	if len(fields) < 2 || fields[1] != "200" {
+		conn.Close()
+		return nil, fmt.Errorf("上游拒绝: %s", line)
+	}
+	return conn, nil
+}
+
+// dialFallback 兜底拨号：未配置或拨号失败返回 nil（调用方走原有报错路径）
+func dialFallback(clientAddr, target, reason string) net.Conn {
+	if !fallbackEnabled || upstreamAddr == "" {
+		return nil
+	}
+	up, err := dialUpstream(target)
+	if err != nil {
+		log.Printf("[兜底] %s ECH 隧道失败（%s），兜底也失败（上游 %s: %v）", clientAddr, reason, upstreamAddr, err)
+		return nil
+	}
+	log.Printf("[兜底] %s ECH 隧道失败（%s），改走上游 %s: %s", clientAddr, reason, upstreamAddr, target)
+	return up
+}
+
+// dialUpstreamForRule 规则命中 upstream 出站时的拨号：未配置或拨号失败返回 nil（调用方回退 ECH）。
+// 与 dialFallback 的区别：这里不是兜底，是规则指定的第一出站，且不受 -fallback 开关影响。
+func dialUpstreamForRule(clientAddr, target string) net.Conn {
+	if upstreamAddr == "" {
+		log.Printf("[上游] %s 规则命中 upstream 出站但未配置 -upstream，回退 ECH: %s", clientAddr, target)
+		return nil
+	}
+	up, err := dialUpstream(target)
+	if err != nil {
+		log.Printf("[上游] %s 本地代理 %s 不可用（%v），回退 ECH: %s", clientAddr, upstreamAddr, err, target)
+		return nil
+	}
+	return up
+}
+
+// writeFull 写完整个缓冲，短写按错误处理
+func writeFull(c net.Conn, b []byte) error {
+	for len(b) > 0 {
+		n, err := c.Write(b)
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return io.ErrShortWrite
+		}
+		b = b[n:]
+	}
+	return nil
+}
+
+// relayRaw 在客户端连接与上游连接之间双向转发，流量计入 connInfoPtr。
+// 任一方向结束即返回，连接的关闭由调用方负责（与直连路径一致）。
+func relayRaw(conn, upstream net.Conn, connInfoPtr *connInfo) {
+	// done 带缓冲 + 阻塞发送，理由同 handleTunnel：恰好 2 个发送方，缓冲 2 保证不阻塞。
+	done := make(chan struct{}, 2)
+
+	// Client -> Upstream
+	go func() {
+		defer func() { done <- struct{}{} }()
+		buf := make([]byte, 65536)
+		for {
+			n, err := conn.Read(buf)
+			if err != nil {
+				return
+			}
+			connInfoPtr.upload.Add(int64(n))
+			if err := writeFull(upstream, buf[:n]); err != nil {
+				return
+			}
+		}
+	}()
+
+	// Upstream -> Client
+	go func() {
+		defer func() { done <- struct{}{} }()
+		buf := make([]byte, 65536)
+		for {
+			n, err := upstream.Read(buf)
+			if err != nil {
+				return
+			}
+			connInfoPtr.download.Add(int64(n))
+			if err := writeFull(conn, buf[:n]); err != nil {
+				return
+			}
+		}
+	}()
+
+	<-done
+}
+
+// runFallbackTunnel 用上游连接接管客户端：重新登记（ruleLabel：clash=ECH失败兜底 / upstream=规则出站）、
+// 回成功握手、双向转发、收尾。调用点是客户端尚未收到握手响应的位置，因此对客户端无感。
+func runFallbackTunnel(conn, upstream net.Conn, oldConnID, clientAddr, target, modeStr string, mode int, firstFrame, matchedRule, ruleLabel string) error {
+	// SOCKS5 的首帧此时可能还没读（ECH 路径也是拨号成功后才读），逻辑保持一致
+	if firstFrame == "" && mode == modeSOCKS5 {
+		_ = conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+		buffer := make([]byte, 65536)
+		n, _ := conn.Read(buffer)
+		_ = conn.SetReadDeadline(time.Time{})
+		if n > 0 {
+			firstFrame = string(buffer[:n])
+		}
+	}
+
+	// 先删后加：避免并发读写 Rule 字段造成数据竞争，同时按出站类型标注规则
+	if oldConnID != "" {
+		removeConn(oldConnID)
+	}
+	if ruleLabel == "" {
+		ruleLabel = "clash"
+	}
+	connID := addConn(clientAddr, target, modeStr, ruleLabel, matchedRule)
+	connInfoObj, _ := activeConns.Load(connID)
+	connInfoPtr := connInfoObj.(*connInfo)
+
+	closeOnce := sync.Once{}
+	cleanup := func() {
+		closeOnce.Do(func() {
+			upstream.Close()
+			conn.Close()
+		})
+	}
+	defer cleanup()
+
+	conn.SetDeadline(time.Time{})
+
+	// 发送成功响应（根据模式不同而不同）
+	if err := sendSuccessResponse(conn, mode); err != nil {
+		removeConn(connID)
+		return err
+	}
+
+	// 预设的第一帧先发给上游
+	if firstFrame != "" {
+		if err := writeFull(upstream, []byte(firstFrame)); err != nil {
+			removeConn(connID)
+			return fmt.Errorf("发送首帧失败: %w", err)
+		}
+	}
+
+	relayRaw(conn, upstream, connInfoPtr)
+
+	cleanup()
+	removeConn(connID)
+	log.Printf("[兜底] %s 上游连接已断开: %s", clientAddr, target)
+	return nil
 }
 
 func main() {
@@ -293,6 +725,12 @@ func main() {
 
 	// 环境变量（命令行参数优先，环境变量其次，config.json 最后）
 	applyEnvDefaults()
+
+	// 解析老化自愈参数（软失败：非法输入只警告，不影响启动）
+	parseRecycleOptions()
+
+	// 解析上游兜底参数（软失败：非法输入只警告，不影响启动）
+	parseFallbackOptions()
 
 	// 加载配置文件（命令行参数 > 环境变量 > config.json）
 	if cfg, err := loadConfig(configFile); err == nil {
@@ -961,55 +1399,123 @@ func lookupIPWithCache(host string) ([]net.IP, error) {
 	return ips, nil
 }
 
-// shouldBypassProxy 根据分流模式判断是否应该绕过代理（直连）
-func shouldBypassProxy(targetHost string) bool {
+// outboundKind 出站类型：直连 / ECH 隧道 / 本地上游（-upstream，如 Clash）
+type outboundKind int
+
+const (
+	outDirect   outboundKind = iota // 本地直连
+	outECH                          // ECH 隧道
+	outUpstream                     // 本地 socks/http 上游
+)
+
+// ruleActionToOutbound 规则动作 → 出站类型（proxy 缺省按 ECH 处理）
+func ruleActionToOutbound(action string) outboundKind {
+	switch action {
+	case "direct":
+		return outDirect
+	case "upstream":
+		return outUpstream
+	default:
+		return outECH
+	}
+}
+
+// cfIPNets 内置 Cloudflare IP 段快照（来源 https://www.cloudflare.com/ips/ ，页面标注最后更新 2023-09-28）。
+// 用于 cfip 规则类型：目标 IP 命中这些网段即算 Cloudflare IP。
+var cfIPNets = mustParseCIDRs([]string{
+	// IPv4
+	"103.21.244.0/22", "103.22.200.0/22", "103.31.4.0/22", "104.16.0.0/13",
+	"104.24.0.0/14", "108.162.192.0/18", "131.0.72.0/22", "141.101.64.0/18",
+	"162.158.0.0/15", "172.64.0.0/13", "173.245.48.0/20", "188.114.96.0/20",
+	"190.93.240.0/20", "197.234.240.0/22", "198.41.128.0/17",
+	// IPv6
+	"2400:cb00::/32", "2606:4700::/32", "2803:f800::/32", "2405:b500::/32",
+	"2405:8100::/32", "2a06:98c0::/29", "2c0f:f248::/32",
+})
+
+// mustParseCIDRs 解析内置网段（字面量写错时 panic，等价于编译期暴露问题）
+func mustParseCIDRs(cidrs []string) []*net.IPNet {
+	nets := make([]*net.IPNet, 0, len(cidrs))
+	for _, c := range cidrs {
+		_, n, err := net.ParseCIDR(c)
+		if err != nil {
+			panic("内置 CF 网段解析失败: " + c)
+		}
+		nets = append(nets, n)
+	}
+	return nets
+}
+
+// isCloudflareIP 判断 IP 是否落在内置 Cloudflare 段内
+func isCloudflareIP(ip net.IP) bool {
+	for _, n := range cfIPNets {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// routeDecision 根据自定义规则与分流模式决定出站方式，
+// 同时返回命中依据（R1：让面板能看见"这条连接为什么走这条路"）。
+func routeDecision(targetHost string) (out outboundKind, matched string) {
 	// 1. 自定义规则优先级最高（任何分流模式下都生效）
-	if matched, bypass := matchCustomRule(targetHost); matched {
-		return bypass
+	if hit, rule, out2 := matchCustomRule(targetHost); hit {
+		switch out2 {
+		case outDirect:
+			return outDirect, fmt.Sprintf("规则 %s:%s → 直连", rule.Type, rule.Value)
+		case outUpstream:
+			return outUpstream, fmt.Sprintf("规则 %s:%s → 本地上游", rule.Type, rule.Value)
+		default:
+			return outECH, fmt.Sprintf("规则 %s:%s → ECH", rule.Type, rule.Value)
+		}
 	}
 
-	// 2. 按分流模式决定
+	// 2. 按分流模式决定（未命中规则时的默认出站）
 	switch routingMode {
 	case "none":
 		// "不改变代理"模式：所有流量都直连
-		return true
+		return outDirect, "模式 none → 直连"
 	case "global":
-		// "全局代理"模式：所有流量都走代理
-		return false
+		// "全局代理"模式：所有流量都走 ECH
+		return outECH, "模式 global → ECH"
 	case "custom":
-		// 自定义规则模式：无匹配规则时默认走代理
-		return false
+		// 自定义规则模式：无匹配规则时默认走 ECH
+		return outECH, "模式 custom(未命中) → ECH"
 	case "bypass_cn":
 		// "跳过中国大陆"模式：检查是否是中国IP
-		if ip := net.ParseIP(targetHost); ip != nil {
-			return isChinaIP(targetHost)
+		if net.ParseIP(targetHost) != nil {
+			if isChinaIP(targetHost) {
+				return outDirect, "模式 bypass_cn(中国IP) → 直连"
+			}
+			return outECH, "模式 bypass_cn(海外IP) → ECH"
 		}
 		// 如果是域名，先解析IP（带缓存）
 		ips, err := lookupIPWithCache(targetHost)
 		if err != nil {
-			// 解析失败，默认走代理
-			return false
+			// 解析失败，默认走 ECH
+			return outECH, "模式 bypass_cn(解析失败) → ECH"
 		}
 		// 检查所有解析到的IP，如果有一个是中国IP，就直连
 		for _, ip := range ips {
 			if isChinaIP(ip.String()) {
-				return true
+				return outDirect, "模式 bypass_cn(中国IP) → 直连"
 			}
 		}
-		// 都不是中国IP，走代理
-		return false
+		// 都不是中国IP，走 ECH
+		return outECH, "模式 bypass_cn(海外IP) → ECH"
 	}
-	// 未知模式，默认走代理
-	return false
+	// 未知模式，默认走 ECH
+	return outECH, "未知模式 → ECH"
 }
 
-// matchCustomRule 匹配自定义规则，返回 (是否命中, 是否直连)
-func matchCustomRule(targetHost string) (bool, bool) {
+// matchCustomRule 匹配自定义规则，返回 (是否命中, 命中的规则, 出站类型)
+func matchCustomRule(targetHost string) (bool, customRule, outboundKind) {
 	customRulesMu.RLock()
 	defer customRulesMu.RUnlock()
 
 	if len(customRules) == 0 {
-		return false, false
+		return false, customRule{}, outECH
 	}
 
 	host, _, err := net.SplitHostPort(targetHost)
@@ -1020,6 +1526,19 @@ func matchCustomRule(targetHost string) (bool, bool) {
 
 	// 检查是否是IP地址
 	isIP := net.ParseIP(host) != nil
+
+	// R3: ipcidr/cfip 规则对域名目标同样生效——按规则顺序遍历，遇到第一条需要 IP 的规则时才解析一次
+	var resolvedIPs []net.IP
+	resolved := false
+	resolveOnce := func() {
+		if resolved {
+			return
+		}
+		resolved = true
+		if ips, err := lookupIPWithCache(host); err == nil {
+			resolvedIPs = ips
+		}
+	}
 
 	for _, rule := range customRules {
 		switch rule.Type {
@@ -1040,27 +1559,49 @@ func matchCustomRule(targetHost string) (bool, bool) {
 					}
 				}
 				if matched {
-					return true, rule.Action == "direct"
+					return true, rule, ruleActionToOutbound(rule.Action)
 				}
 			}
 		case "ipcidr":
+			_, cidr, err := net.ParseCIDR(rule.Value)
+			if err != nil {
+				continue
+			}
 			if isIP {
-				ip := net.ParseIP(host)
-				if ip != nil {
-					_, cidr, err := net.ParseCIDR(rule.Value)
-					if err == nil && cidr.Contains(ip) {
-						return true, rule.Action == "direct"
-					}
+				if ip := net.ParseIP(host); ip != nil && cidr.Contains(ip) {
+					return true, rule, ruleActionToOutbound(rule.Action)
+				}
+				continue
+			}
+			// 域名目标：解析后回查（解析结果由 lookupIPWithCache 缓存 5 分钟）
+			resolveOnce()
+			for _, ip := range resolvedIPs {
+				if cidr.Contains(ip) {
+					return true, rule, ruleActionToOutbound(rule.Action)
+				}
+			}
+		case "cfip":
+			// 内置 Cloudflare IP 段匹配：IP 字面量直接查，域名先解析再查
+			if isIP {
+				if ip := net.ParseIP(host); ip != nil && isCloudflareIP(ip) {
+					return true, rule, ruleActionToOutbound(rule.Action)
+				}
+				continue
+			}
+			resolveOnce()
+			for _, ip := range resolvedIPs {
+				if isCloudflareIP(ip) {
+					return true, rule, ruleActionToOutbound(rule.Action)
 				}
 			}
 		case "keyword":
 			if rule.Value != "" && strings.Contains(host, strings.ToLower(rule.Value)) {
-				return true, rule.Action == "direct"
+				return true, rule, ruleActionToOutbound(rule.Action)
 			}
 		}
 	}
 	// 没有匹配规则
-	return false, false
+	return false, customRule{}, outECH
 }
 
 func isNormalCloseError(err error) bool {
@@ -1079,11 +1620,11 @@ func isNormalCloseError(err error) bool {
 
 // ======================== 自定义规则 ========================
 
-// loadCustomRules 从文件加载自定义规则
-func loadCustomRules(filePath string) error {
+// parseRulesFile 解析规则文件（CSV：type,value,action），返回解析出的规则
+func parseRulesFile(filePath string) ([]customRule, error) {
 	file, err := os.Open(filePath)
 	if err != nil {
-		return fmt.Errorf("打开规则文件失败: %w", err)
+		return nil, fmt.Errorf("打开规则文件失败: %w", err)
 	}
 	defer file.Close()
 
@@ -1104,10 +1645,13 @@ func loadCustomRules(filePath string) error {
 		value := strings.TrimSpace(parts[1])
 		action := strings.TrimSpace(parts[2])
 
-		if ruleType != "domain" && ruleType != "ipcidr" && ruleType != "keyword" {
+		if ruleType != "domain" && ruleType != "ipcidr" && ruleType != "keyword" && ruleType != "cfip" {
 			continue
 		}
-		if action != "proxy" && action != "direct" {
+		if action != "proxy" && action != "direct" && action != "upstream" {
+			continue
+		}
+		if value == "" && ruleType != "cfip" { // cfip 的 value 只是备注，可为空
 			continue
 		}
 
@@ -1119,21 +1663,42 @@ func loadCustomRules(filePath string) error {
 	}
 
 	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("读取规则文件失败: %w", err)
+		return nil, fmt.Errorf("读取规则文件失败: %w", err)
+	}
+
+	return rules, nil
+}
+
+// rebuildCustomRulesLocked 重建生效规则列表（调用方需已持有 customRulesMu 写锁）
+func rebuildCustomRulesLocked() {
+	merged := make([]customRule, 0, len(fileRules)+len(panelRules))
+	merged = append(merged, fileRules...)
+	merged = append(merged, panelRules...)
+	customRules = merged
+}
+
+// loadCustomRules 从 -rules 指定的 CSV 文件加载规则（只读桶，面板保存不会覆盖它）
+func loadCustomRules(filePath string) error {
+	rules, err := parseRulesFile(filePath)
+	if err != nil {
+		return err
 	}
 
 	customRulesMu.Lock()
-	customRules = rules
+	fileRules = rules
+	rebuildCustomRulesLocked()
+	total := len(customRules)
 	customRulesMu.Unlock()
 
+	log.Printf("[规则] 已加载文件规则 %d 条 (%s)，生效规则合计 %d 条", len(rules), filePath, total)
 	return nil
 }
 
-// saveCustomRules 保存自定义规则到文件
+// saveCustomRules 保存面板规则到文件（只写面板桶，避免把 -rules CSV 规则抄进 rules.json）
 func saveCustomRules(filePath string) error {
 	customRulesMu.RLock()
-	rules := make([]customRule, len(customRules))
-	copy(rules, customRules)
+	rules := make([]customRule, len(panelRules))
+	copy(rules, panelRules)
 	customRulesMu.RUnlock()
 
 	// 确保目录存在
@@ -1156,7 +1721,7 @@ func saveCustomRules(filePath string) error {
 	return nil
 }
 
-// loadRulesDataFile 从面板规则持久化文件加载规则
+// loadRulesDataFile 从面板规则持久化文件加载规则（可编辑桶，与 -rules CSV 分开存放）
 func loadRulesDataFile() {
 	if rulesData == "" {
 		return
@@ -1164,19 +1729,25 @@ func loadRulesDataFile() {
 	if _, err := os.Stat(rulesData); os.IsNotExist(err) {
 		return
 	}
-	if err := loadCustomRules(rulesData); err != nil {
+	rules, err := parseRulesFile(rulesData)
+	if err != nil {
 		log.Printf("[规则] 加载面板规则失败: %v", err)
-	} else {
-		customRulesMu.RLock()
-		log.Printf("[规则] 已从面板规则文件加载 %d 条规则", len(customRules))
-		customRulesMu.RUnlock()
+		return
 	}
+
+	customRulesMu.Lock()
+	panelRules = rules
+	rebuildCustomRulesLocked()
+	fileCnt, panelCnt, total := len(fileRules), len(panelRules), len(customRules)
+	customRulesMu.Unlock()
+
+	log.Printf("[规则] 已加载面板规则 %d 条（文件规则 %d 条，生效合计 %d 条）", panelCnt, fileCnt, total)
 }
 
 // ======================== 连接追踪与流量统计 ========================
 
 // addConn 添加连接追踪
-func addConn(source, target, mode, rule string) string {
+func addConn(source, target, mode, rule, matched string) string {
 	id := fmt.Sprintf("%d", connIDCounter.Add(1))
 	info := &connInfo{
 		ID:        id,
@@ -1184,6 +1755,7 @@ func addConn(source, target, mode, rule string) string {
 		Target:    target,
 		Mode:      mode,
 		Rule:      rule,
+		Matched:   matched,
 		StartTime: time.Now(),
 	}
 	activeConns.Store(id, info)
@@ -1215,6 +1787,7 @@ func getActiveConns() []connInfoResp {
 			Target:    info.Target,
 			Mode:      info.Mode,
 			Rule:      info.Rule,
+			Matched:   info.Matched,
 			Upload:    info.upload.Load(),
 			Download:  info.download.Load(),
 			StartTime: info.StartTime,
@@ -1547,30 +2120,59 @@ func handleRules(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
 	if r.Method == "GET" {
+		// 只返回面板桶：-rules CSV 属于只读配置，面板改不到它（R2 规则源分离）
 		customRulesMu.RLock()
-		rules := make([]customRule, len(customRules))
-		copy(rules, customRules)
+		rules := make([]customRule, len(panelRules))
+		copy(rules, panelRules)
 		customRulesMu.RUnlock()
 		json.NewEncoder(w).Encode(rules)
 		return
 	}
 
-	// POST: 替换规则
+	// POST: 替换面板规则
 	var rules []customRule
 	if err := json.NewDecoder(r.Body).Decode(&rules); err != nil {
 		http.Error(w, `{"error":"invalid json"}`, 400)
 		return
 	}
+	// 逐条校验，拒绝脏数据（否则坏规则会静默落盘且永远匹配不上）
+	for i, rule := range rules {
+		rule.Value = strings.TrimSpace(rule.Value)
+		switch rule.Type {
+		case "domain", "keyword":
+			if rule.Value == "" {
+				http.Error(w, fmt.Sprintf(`{"error":"第 %d 条规则值为空"}`, i+1), 400)
+				return
+			}
+		case "ipcidr":
+			if _, _, err := net.ParseCIDR(rule.Value); err != nil {
+				http.Error(w, fmt.Sprintf(`{"error":"第 %d 条 ipcidr 格式无效: %s"}`, i+1, rule.Value), 400)
+				return
+			}
+		case "cfip":
+			// value 只是备注（匹配只看内置 CF 段），允许任意文本
+		default:
+			http.Error(w, fmt.Sprintf(`{"error":"第 %d 条类型无效: %s"}`, i+1, rule.Type), 400)
+			return
+		}
+		if rule.Action != "proxy" && rule.Action != "direct" && rule.Action != "upstream" {
+			http.Error(w, fmt.Sprintf(`{"error":"第 %d 条动作无效: %s"}`, i+1, rule.Action), 400)
+			return
+		}
+		rules[i].Value = rule.Value
+	}
 
 	customRulesMu.Lock()
-	customRules = rules
+	panelRules = rules
+	rebuildCustomRulesLocked()
+	total := len(customRules)
 	customRulesMu.Unlock()
 
 	// 持久化到文件
 	if err := saveCustomRules(rulesData); err != nil {
 		log.Printf("[规则] 保存规则失败: %v", err)
 	} else {
-		log.Printf("[规则] 已保存 %d 条规则到 %s", len(rules), rulesData)
+		log.Printf("[规则] 已保存 %d 条面板规则到 %s（生效合计 %d 条）", len(rules), rulesData, total)
 	}
 
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
@@ -1591,7 +2193,8 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 				strings.Contains(strings.ToLower(c.Source), search) ||
 				strings.Contains(strings.ToLower(c.Target), search) ||
 				strings.Contains(strings.ToLower(c.Mode), search) ||
-				strings.Contains(strings.ToLower(c.Rule), search) {
+				strings.Contains(strings.ToLower(c.Rule), search) ||
+				strings.Contains(strings.ToLower(c.Matched), search) {
 				filtered = append(filtered, c)
 			}
 		}
@@ -2354,6 +2957,27 @@ func runProxyServer(addr string) {
 
 	log.Printf("[代理] 服务器启动: %s (支持 SOCKS5 和 HTTP)", addr)
 	log.Printf("[代理] 后端服务器: %s", serverAddr)
+	if recycleEnabled && (recycleBytes > 0 || recycleDuration > 0) {
+		bytesDesc := "关闭"
+		if recycleBytes > 0 {
+			bytesDesc = formatBytes(recycleBytes)
+		}
+		durDesc := "关闭"
+		if recycleDuration > 0 {
+			durDesc = recycleDuration.String()
+		}
+		log.Printf("[代理] 连接老化自愈: 流量阈值 %s, 时长阈值 %s（达到即断开等待播放器重连）", bytesDesc, durDesc)
+	} else {
+		log.Printf("[代理] 连接老化自愈: 已关闭")
+	}
+	switch {
+	case !fallbackEnabled:
+		log.Printf("[兜底] 已关闭（-fallback off），ECH 隧道失败直接返回错误")
+	case upstreamAddr == "":
+		log.Printf("[兜底] 未配置 -upstream，ECH 隧道失败直接返回错误")
+	default:
+		log.Printf("[兜底] ECH 隧道失败将自动改走上游: %s (%s)", upstreamAddr, upstreamKind)
+	}
 	if serverIP != "" {
 		log.Printf("[代理] 使用固定 IP: %s", serverIP)
 	}
@@ -2811,31 +3435,54 @@ func handleTunnel(conn net.Conn, target, clientAddr string, mode int, firstFrame
 		targetHost = target
 	}
 
-	// 检查是否应该绕过代理（直连）
-	rule := "proxy"
-	if shouldBypassProxy(targetHost) {
-		rule = "direct"
-		log.Printf("[分流] %s -> %s (直连, 模式=%s)", clientAddr, target, routingMode)
-		return handleDirectConnection(conn, target, clientAddr, mode, firstFrame)
-	}
+	// 分流决策：三出站（直连 / 本地上游 / ECH）+ 命中依据（R1：依据进面板）
+	out, matchedRule := routeDecision(targetHost)
 
-	// 走代理
 	modeStr := "socks5"
 	if mode == modeHTTPConnect {
 		modeStr = "http-connect"
 	} else if mode == modeHTTPProxy {
 		modeStr = "http-proxy"
 	}
-	connID := addConn(clientAddr, target, modeStr, rule)
+
+	if out == outDirect {
+		log.Printf("[分流] %s -> %s (直连, 模式=%s, 依据=%s)", clientAddr, target, routingMode, matchedRule)
+		return handleDirectConnection(conn, target, clientAddr, mode, firstFrame, matchedRule)
+	}
+
+	// 规则指定走本地上游（-upstream，如 Clash）：拨不通则自动回退 ECH，ECH 再失败才 502。
+	// 这里不看 -fallback 开关（那是 ECH 失败兜底的开关），规则出站始终按规则走。
+	if out == outUpstream {
+		if up := dialUpstreamForRule(clientAddr, target); up != nil {
+			log.Printf("[分流] %s -> %s (本地上游, 模式=%s, 依据=%s)", clientAddr, target, routingMode, matchedRule)
+			return runFallbackTunnel(conn, up, "", clientAddr, target, modeStr, mode, firstFrame, matchedRule, "upstream")
+		}
+		matchedRule += "（本地代理不可用，改走 ECH）"
+	}
+
+	// 走 ECH 隧道
+	connID := addConn(clientAddr, target, modeStr, "proxy", matchedRule)
 	connInfoObj, _ := activeConns.Load(connID)
 	connInfoPtr := connInfoObj.(*connInfo)
 
-	log.Printf("[分流] %s -> %s (通过代理, 模式=%s)", clientAddr, target, routingMode)
-	wsConn, err := dialWebSocketWithECH(2)
-	if err != nil {
+	log.Printf("[分流] %s -> %s (通过代理, 模式=%s, 依据=%s)", clientAddr, target, routingMode, matchedRule)
+	var wsConn *websocket.Conn
+	wsConn, err = dialWebSocketWithECH(2)
+	// ECH 隧道建立失败的统一出口：先尝试本地 Clash 兜底，兜不住再回错误给客户端。
+	// 下面这些位置客户端都还没收到握手响应，改走上游对客户端完全无感。
+	fallbackOrFail := func(reason string, cause error) error {
+		if up := dialFallback(clientAddr, target, reason); up != nil {
+			if wsConn != nil {
+				wsConn.Close()
+			}
+			return runFallbackTunnel(conn, up, connID, clientAddr, target, modeStr, mode, firstFrame, matchedRule, "clash")
+		}
 		removeConn(connID)
 		sendErrorResponse(conn, mode)
-		return err
+		return cause
+	}
+	if err != nil {
+		return fallbackOrFail("拨号失败: "+err.Error(), err)
 	}
 
 	var mu sync.Mutex
@@ -2897,29 +3544,22 @@ func handleTunnel(conn net.Conn, target, clientAddr string, mode int, firstFrame
 	err = wsConn.WriteMessage(websocket.TextMessage, []byte(connectMsg))
 	mu.Unlock()
 	if err != nil {
-		removeConn(connID)
-		sendErrorResponse(conn, mode)
-		return err
+		return fallbackOrFail("发送 CONNECT 失败: "+err.Error(), err)
 	}
 
 	// 等待响应
 	_, msg, err := wsConn.ReadMessage()
 	if err != nil {
-		removeConn(connID)
-		sendErrorResponse(conn, mode)
-		return err
+		return fallbackOrFail("握手读取失败: "+err.Error(), err)
 	}
 
 	response := string(msg)
 	if strings.HasPrefix(response, "ERROR:") {
-		removeConn(connID)
-		sendErrorResponse(conn, mode)
-		return errors.New(response)
+		reason := strings.TrimPrefix(response, "ERROR:")
+		return fallbackOrFail("服务端拒绝: "+reason, errors.New(response))
 	}
 	if response != "CONNECTED" {
-		removeConn(connID)
-		sendErrorResponse(conn, mode)
-		return fmt.Errorf("意外响应: %s", response)
+		return fallbackOrFail("意外响应: "+response, fmt.Errorf("意外响应: %s", response))
 	}
 
 	// 发送成功响应（根据模式不同而不同）
@@ -2999,6 +3639,43 @@ func handleTunnel(conn net.Conn, target, clientAddr string, mode int, firstFrame
 		}
 	}()
 
+	// ========== 连接老化自愈：到量/到时主动断开 ==========
+	// 结构完全复用上面的 stopIdle 巡检 goroutine：defer close(stop) 防泄漏，
+	// 触发时调用既有的 cleanup()（sync.Once，与空闲超时清理同一条收尾路径）。
+	stopRecycle := make(chan struct{})
+	defer close(stopRecycle)
+	if recycleEnabled && (recycleBytes > 0 || recycleDuration > 0) {
+		startAt := time.Now()
+		go func() {
+			ticker := time.NewTicker(5 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ticker.C:
+					total := connInfoPtr.upload.Load() + connInfoPtr.download.Load()
+					if total <= 0 {
+						continue
+					}
+					if recycleBytes > 0 && total >= recycleBytes {
+						log.Printf("[老化] %s 已传输 %s（阈值 %s），主动断开等待播放器重连: %s",
+							clientAddr, formatBytes(total), formatBytes(recycleBytes), target)
+						cleanup()
+						return
+					}
+					if recycleDuration > 0 && time.Since(startAt) >= recycleDuration {
+						log.Printf("[老化] %s 已存活 %s（阈值 %s，已传输 %s），主动断开等待播放器重连: %s",
+							clientAddr, time.Since(startAt).Round(time.Second), recycleDuration,
+							formatBytes(total), target)
+						cleanup()
+						return
+					}
+				case <-stopRecycle:
+					return
+				}
+			}
+		}()
+	}
+
 	<-done
 	cleanup()
 	removeConn(connID)
@@ -3009,7 +3686,7 @@ func handleTunnel(conn net.Conn, target, clientAddr string, mode int, firstFrame
 // ======================== 直连处理 ========================
 
 // handleDirectConnection 处理直连（绕过代理）
-func handleDirectConnection(conn net.Conn, target, clientAddr string, mode int, firstFrame string) error {
+func handleDirectConnection(conn net.Conn, target, clientAddr string, mode int, firstFrame, matchedRule string) error {
 	// 解析目标地址
 	host, port, err := net.SplitHostPort(target)
 	if err != nil {
@@ -3029,7 +3706,7 @@ func handleDirectConnection(conn net.Conn, target, clientAddr string, mode int, 
 	} else if mode == modeHTTPProxy {
 		modeStr = "http-proxy"
 	}
-	connID := addConn(clientAddr, target, modeStr, "direct")
+	connID := addConn(clientAddr, target, modeStr, "direct", matchedRule)
 	connInfoObj, _ := activeConns.Load(connID)
 	connInfoPtr := connInfoObj.(*connInfo)
 
@@ -3079,52 +3756,9 @@ func handleDirectConnection(conn net.Conn, target, clientAddr string, mode int, 
 		}
 	}
 
-	// 双向转发
-	done := make(chan struct{})
+	// 双向转发（与 Clash 兜底共用 relayRaw）
+	relayRaw(conn, targetConn, connInfoPtr)
 
-	// Client -> Target
-	go func() {
-		defer func() { select { case done <- struct{}{}: default: } }()
-		buf := make([]byte, 65536)
-		for {
-			n, err := conn.Read(buf)
-			if err != nil {
-				return
-			}
-			connInfoPtr.upload.Add(int64(n))
-			written := 0
-			for written < n {
-				m, err := targetConn.Write(buf[written:n])
-				if err != nil {
-					return
-				}
-				written += m
-			}
-		}
-	}()
-
-	// Target -> Client
-	go func() {
-		defer func() { select { case done <- struct{}{}: default: } }()
-		buf := make([]byte, 65536)
-		for {
-			n, err := targetConn.Read(buf)
-			if err != nil {
-				return
-			}
-			connInfoPtr.download.Add(int64(n))
-			written := 0
-			for written < n {
-				m, err := conn.Write(buf[written:n])
-				if err != nil {
-					return
-				}
-				written += m
-			}
-		}
-	}()
-
-	<-done
 	cleanup()
 	removeConn(connID)
 	log.Printf("[分流] %s 直连已断开: %s", clientAddr, target)
