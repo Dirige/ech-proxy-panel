@@ -554,7 +554,11 @@ select.theme-select:focus{outline:none;border-color:var(--cyan)}
       </div>
       <div class="config-item"><label>DoH 服务器</label><input id="cfg-dns"></div>
       <div class="config-item"><label>ECH 域名</label><input id="cfg-ech"></div>
-      <div class="config-item"><label>管理面板地址</label><input id="cfg-web"></div>
+      <div class="config-item">
+        <label>管理面板地址</label>
+        <input id="cfg-web" placeholder="30001 或 0.0.0.0:30001">
+        <div class="hint">可只填端口；端口改动需重启面板/容器生效</div>
+      </div>
       <div class="config-item"><label>面板密码</label><input id="cfg-password" type="password" placeholder="留空 = 无需登录"></div>
       <div class="config-item">
         <label>兜底上游（SOCKS5 / HTTP）</label>
@@ -773,7 +777,7 @@ async function resetCFIPs(){
 }
 window.addEventListener('beforeunload',e=>{if(rulesDirty){e.preventDefault();e.returnValue=''}})
 
-async function loadConfig(){const c=await api('/api/config');document.getElementById('cfg-listen').value=c.listen_addr;document.getElementById('cfg-server').value=c.server_addr;document.getElementById('cfg-serverip').value=c.server_ip;document.getElementById('cfg-token').value=c.token;document.getElementById('cfg-dns').value=c.dns_server;document.getElementById('cfg-ech').value=c.ech_domain;document.getElementById('cfg-routing').value=c.routing_mode;document.getElementById('cfg-proxyip').value=c.proxy_ip||'';document.getElementById('cfg-web').value=c.web_addr;document.getElementById('cfg-password').value=c.web_password||'';document.getElementById('cfg-upstream').value=c.upstream||'';document.getElementById('cfg-fallback').value=c.fallback||'on'}
+async function loadConfig(){const c=await api('/api/config');document.getElementById('cfg-listen').value=c.listen_addr;document.getElementById('cfg-server').value=c.server_addr;document.getElementById('cfg-serverip').value=c.server_ip;document.getElementById('cfg-token').value=c.token;document.getElementById('cfg-dns').value=c.dns_server;document.getElementById('cfg-ech').value=c.ech_domain;document.getElementById('cfg-routing').value=c.routing_mode;document.getElementById('cfg-proxyip').value=c.proxy_ip||'';document.getElementById('cfg-web').value=(c.web_addr||'').replace(/^:/,'');document.getElementById('cfg-password').value=c.web_password||'';document.getElementById('cfg-upstream').value=c.upstream||'';document.getElementById('cfg-fallback').value=c.fallback||'on'}
 async function saveConfig(){await api('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({listen_addr:document.getElementById('cfg-listen').value,server_addr:document.getElementById('cfg-server').value,server_ip:document.getElementById('cfg-serverip').value,token:document.getElementById('cfg-token').value,dns_server:document.getElementById('cfg-dns').value,ech_domain:document.getElementById('cfg-ech').value,proxy_ip:document.getElementById('cfg-proxyip').value,routing_mode:document.getElementById('cfg-routing').value,web_addr:document.getElementById('cfg-web').value,web_password:document.getElementById('cfg-password').value,upstream:document.getElementById('cfg-upstream').value,fallback:document.getElementById('cfg-fallback').value})});toast('配置已保存，重启后生效');loadConfig()}
 async function refreshECH(){const r=await api('/api/service/refresh-ech',{method:'POST'});toast(r.message||r.error);loadOverview()}
 

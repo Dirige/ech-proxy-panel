@@ -256,6 +256,18 @@ func validHostPort(s string) bool {
 	return err == nil && port != ""
 }
 
+// normalizeWebAddr 面板地址宽容输入：纯端口（如 "30001"）补成 ":30001"，其余原样返回
+func normalizeWebAddr(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return s
+	}
+	if _, err := strconv.Atoi(s); err == nil {
+		return ":" + s
+	}
+	return s
+}
+
 // statusResponse 状态响应
 type statusResponse struct {
 	Version      string  `json:"version"`
@@ -813,6 +825,7 @@ func main() {
 		webAddr = ":30001"
 		log.Printf("[启动] 未指定面板地址，默认监听 :30001")
 	}
+	webAddr = normalizeWebAddr(webAddr)
 
 	if serverAddr == "" {
 		log.Fatal("必须指定服务端地址 -f\n\n示例:\n  ./client -l 127.0.0.1:1080 -f your-worker.workers.dev:443 -token your-token")
@@ -2136,8 +2149,12 @@ func handleConfig(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]string{"error": "server_addr 非法，需要 host:port 格式，例如 xxx.workers.dev:443"})
 		return
 	}
+	// 面板地址宽容：纯端口输入（如 30001）先归一化成 :30001 再校验
+	if v, ok := update["web_addr"]; ok {
+		update["web_addr"] = normalizeWebAddr(v)
+	}
 	if v, ok := update["web_addr"]; ok && v != "" && !validHostPort(v) {
-		json.NewEncoder(w).Encode(map[string]string{"error": "web_addr 非法，需要 host:port 格式，例如 :30001"})
+		json.NewEncoder(w).Encode(map[string]string{"error": "web_addr 非法，可填端口（如 30001）或 host:port（如 0.0.0.0:30001）"})
 		return
 	}
 	if v, ok := update["dns_server"]; ok && v == "" {
