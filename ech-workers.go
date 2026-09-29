@@ -252,7 +252,7 @@ func saveConfig(filePath string) error {
 }
 
 // appVersion 面板与镜像版本号（发版时同步改这里 + workflow tag）
-const appVersion = "1.2"
+const appVersion = "1.3"
 
 // validHostPort 校验 host:port 格式（:30001、0.0.0.0:30000、example.com:443 均合法）
 func validHostPort(s string) bool {
