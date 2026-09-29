@@ -572,6 +572,16 @@ select.theme-select:focus{outline:none;border-color:var(--cyan)}
           <option value="off">关</option>
         </select>
       </div>
+      <div class="config-item">
+        <label>老化流量阈值</label>
+        <input id="cfg-recycle-bytes" placeholder="如 150m，0 = 关闭">
+        <div class="hint">单隧道搬满即主动断开，播放器自动重连换新隧道（CF 免费节点越用越慢的自愈），保存即生效</div>
+      </div>
+      <div class="config-item">
+        <label>老化时长阈值</label>
+        <input id="cfg-recycle-duration" placeholder="如 15m，0 = 关闭">
+        <div class="hint">单隧道最长存活时间，到点换新，保存即生效</div>
+      </div>
     </div>
   </div>
 </div>
@@ -777,8 +787,8 @@ async function resetCFIPs(){
 }
 window.addEventListener('beforeunload',e=>{if(rulesDirty){e.preventDefault();e.returnValue=''}})
 
-async function loadConfig(){const c=await api('/api/config');document.getElementById('cfg-listen').value=c.listen_addr;document.getElementById('cfg-server').value=c.server_addr;document.getElementById('cfg-serverip').value=c.server_ip;document.getElementById('cfg-token').value=c.token;document.getElementById('cfg-dns').value=c.dns_server;document.getElementById('cfg-ech').value=c.ech_domain;document.getElementById('cfg-routing').value=c.routing_mode;document.getElementById('cfg-proxyip').value=c.proxy_ip||'';document.getElementById('cfg-web').value=(c.web_addr||'').replace(/^:/,'');document.getElementById('cfg-password').value=c.web_password||'';document.getElementById('cfg-upstream').value=c.upstream||'';document.getElementById('cfg-fallback').value=c.fallback||'on'}
-async function saveConfig(){await api('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({listen_addr:document.getElementById('cfg-listen').value,server_addr:document.getElementById('cfg-server').value,server_ip:document.getElementById('cfg-serverip').value,token:document.getElementById('cfg-token').value,dns_server:document.getElementById('cfg-dns').value,ech_domain:document.getElementById('cfg-ech').value,proxy_ip:document.getElementById('cfg-proxyip').value,routing_mode:document.getElementById('cfg-routing').value,web_addr:document.getElementById('cfg-web').value,web_password:document.getElementById('cfg-password').value,upstream:document.getElementById('cfg-upstream').value,fallback:document.getElementById('cfg-fallback').value})});toast('配置已保存，重启后生效');loadConfig()}
+async function loadConfig(){const c=await api('/api/config');document.getElementById('cfg-listen').value=c.listen_addr;document.getElementById('cfg-server').value=c.server_addr;document.getElementById('cfg-serverip').value=c.server_ip;document.getElementById('cfg-token').value=c.token;document.getElementById('cfg-dns').value=c.dns_server;document.getElementById('cfg-ech').value=c.ech_domain;document.getElementById('cfg-routing').value=c.routing_mode;document.getElementById('cfg-proxyip').value=c.proxy_ip||'';document.getElementById('cfg-web').value=(c.web_addr||'').replace(/^:/,'');document.getElementById('cfg-password').value=c.web_password||'';document.getElementById('cfg-upstream').value=c.upstream||'';document.getElementById('cfg-fallback').value=c.fallback||'on';document.getElementById('cfg-recycle-bytes').value=c.recycle_bytes||'0';document.getElementById('cfg-recycle-duration').value=c.recycle_duration||'0'}
+async function saveConfig(){await api('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({listen_addr:document.getElementById('cfg-listen').value,server_addr:document.getElementById('cfg-server').value,server_ip:document.getElementById('cfg-serverip').value,token:document.getElementById('cfg-token').value,dns_server:document.getElementById('cfg-dns').value,ech_domain:document.getElementById('cfg-ech').value,proxy_ip:document.getElementById('cfg-proxyip').value,routing_mode:document.getElementById('cfg-routing').value,web_addr:document.getElementById('cfg-web').value,web_password:document.getElementById('cfg-password').value,upstream:document.getElementById('cfg-upstream').value,fallback:document.getElementById('cfg-fallback').value,recycle_bytes:document.getElementById('cfg-recycle-bytes').value,recycle_duration:document.getElementById('cfg-recycle-duration').value})});toast('配置已保存（监听/端口类需重启，其余立即生效）');loadConfig()}
 async function refreshECH(){const r=await api('/api/service/refresh-ech',{method:'POST'});toast(r.message||r.error);loadOverview()}
 
 let ws;

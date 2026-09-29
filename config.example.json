@@ -8,5 +8,9 @@
   "routing_mode": "bypass_cn",
   "web_addr": ":30001",
   "proxy_ip": "",
-  "web_password": ""
+  "web_password": "",
+  "upstream": "",
+  "fallback": "on",
+  "recycle_bytes": "800m",
+  "recycle_duration": "0"
 }

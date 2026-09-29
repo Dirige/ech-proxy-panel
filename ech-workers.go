@@ -202,6 +202,8 @@ type appConfig struct {
 	Fallback    string `json:"fallback"`
 	CfipAdd     []string `json:"cfip_add"`
 	CfipDel     []string `json:"cfip_del"`
+	RecycleBytes    string `json:"recycle_bytes"`
+	RecycleDuration string `json:"recycle_duration"`
 }
 
 // loadConfig 从文件加载配置
@@ -234,6 +236,8 @@ func saveConfig(filePath string) error {
 		Fallback:    fallbackSwitchRaw,
 		CfipAdd:     cfipAdd,
 		CfipDel:     cfipDel,
+		RecycleBytes:    recycleBytesRaw,
+		RecycleDuration: recycleDurationRaw,
 	}
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
@@ -801,6 +805,12 @@ func main() {
 		if cfg.CfipDel != nil {
 			cfipDel = cfg.CfipDel
 		}
+		if recycleBytesRaw == "800m" && cfg.RecycleBytes != "" {
+			recycleBytesRaw = cfg.RecycleBytes
+		}
+		if recycleDurationRaw == "0" && cfg.RecycleDuration != "" {
+			recycleDurationRaw = cfg.RecycleDuration
+		}
 	} else if configFile != "" {
 		log.Printf("[启动] 配置文件不存在或无效，使用命令行参数")
 	}
@@ -816,8 +826,9 @@ func main() {
 		}
 	}
 
-	// 配置文件里的上游/兜底开关/CF增减量在解析之后加载，需重新应用一次使其生效
+	// 配置文件里的上游/兜底开关/CF增减量/老化阈值在解析之后加载，需重新应用一次使其生效
 	parseFallbackOptions()
+	parseRecycleOptions()
 	rebuildCFNets()
 
 	// 面板默认监听 :30001（可用 -web / ECH_WEB / 配置文件 web_addr 覆盖）
@@ -2128,6 +2139,8 @@ func handleConfig(w http.ResponseWriter, r *http.Request) {
 			"web_password": webPassword,
 			"upstream":     upstreamRaw,
 			"fallback":     fallbackSwitchRaw,
+			"recycle_bytes":    recycleBytesRaw,
+			"recycle_duration": recycleDurationRaw,
 		}
 		json.NewEncoder(w).Encode(config)
 		return
@@ -2221,6 +2234,36 @@ func handleConfig(w http.ResponseWriter, r *http.Request) {
 	if v, ok := update["web_addr"]; ok && v != "" {
 		webAddr = v
 	}
+
+	// 老化阈值：先整体校验再落盘，避免写坏一半
+	recBytes, recDur := recycleBytesRaw, recycleDurationRaw
+	if v, ok := update["recycle_bytes"]; ok {
+		s := strings.TrimSpace(v)
+		if s == "" {
+			s = "0"
+		}
+		if _, err := parseSize(s); err != nil {
+			json.NewEncoder(w).Encode(map[string]string{"error": "老化流量阈值非法，如 150m / 2g，0 = 关闭"})
+			return
+		}
+		recBytes = s
+	}
+	if v, ok := update["recycle_duration"]; ok {
+		s := strings.TrimSpace(v)
+		if s == "" {
+			s = "0"
+		}
+		if s != "0" {
+			if d, err := time.ParseDuration(s); err != nil || d < 0 {
+				json.NewEncoder(w).Encode(map[string]string{"error": "老化时长阈值非法，如 15m / 1h，0 = 关闭"})
+				return
+			}
+		}
+		recDur = s
+	}
+	recycleBytesRaw, recycleDurationRaw = recBytes, recDur
+	parseRecycleOptions()
+	log.Printf("[配置] 老化阈值: 流量 %s / 时长 %s", recycleBytesRaw, recycleDurationRaw)
 
 	// 刷新 ECH
 	if err := refreshECH(); err != nil {
