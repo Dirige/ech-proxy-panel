@@ -54,6 +54,7 @@ var (
 	configFile  string // 配置文件路径
 	proxyIP     string // 固定出口 IP（格式: ip 或 ip:port）
 	webPassword string // Web 管理面板登录密码（为空则不需登录）
+	restartAtRaw string // 每日定时重启时间 (HH:MM，off=关闭)
 
 	// ========== 长连接（视频）稳定性相关 ==========
 
@@ -148,28 +149,30 @@ type ipRangeV6 struct {
 
 // connInfo 连接信息
 type connInfo struct {
-	ID        string
-	Source    string
-	Target    string
-	Mode      string
-	Rule      string
-	Matched   string // 命中依据（哪条规则 / 哪个分流模式），面板可观测
-	StartTime time.Time
-	upload    atomic.Int64
-	download  atomic.Int64
+	ID         string
+	Source     string
+	Target     string
+	Mode       string
+	Rule       string
+	Matched    string // 命中依据（哪条规则 / 哪个分流模式），面板可观测
+	DialedAddr string // 实际拨通的远端地址
+	StartTime  time.Time
+	upload     atomic.Int64
+	download   atomic.Int64
 }
 
 // connInfoResp 用于 JSON 序列化的连接信息（不含 atomic 字段）
 type connInfoResp struct {
-	ID        string    `json:"id"`
-	Source    string    `json:"source"`
-	Target    string    `json:"target"`
-	Mode      string    `json:"mode"`
-	Rule      string    `json:"rule"`
-	Matched   string    `json:"matched"`
-	Upload    int64     `json:"upload"`
-	Download  int64     `json:"download"`
-	StartTime time.Time `json:"start_time"`
+	ID         string    `json:"id"`
+	Source     string    `json:"source"`
+	Target     string    `json:"target"`
+	Mode       string    `json:"mode"`
+	Rule       string    `json:"rule"`
+	Matched    string    `json:"matched"`
+	DialedAddr string    `json:"dialed_addr"`
+	Upload     int64     `json:"upload"`
+	Download   int64     `json:"download"`
+	StartTime  time.Time `json:"start_time"`
 }
 
 // logEntry 日志条目
@@ -308,6 +311,7 @@ func init() {
 	flag.StringVar(&recycleSwitchRaw, "recycle", "on", "老化自愈总开关: on/off")
 	flag.StringVar(&upstreamRaw, "upstream", "", "ECH 隧道失败时的兜底上游 (如 127.0.0.1:7890、socks5://127.0.0.1:7890、http://127.0.0.1:7891，留空=不兜底)")
 	flag.StringVar(&fallbackSwitchRaw, "fallback", "on", "兜底总开关: on/off")
+	flag.StringVar(&restartAtRaw, "restart-at", "05:00", "每日定时重启 (本地时区 HH:MM，off=关闭，进程内自重启不中断容器)")
 }
 
 // applyEnvDefaults 从环境变量加载默认值（命令行参数优先）
@@ -364,6 +368,9 @@ func applyEnvDefaults() {
 	}
 	if v := os.Getenv("ECH_FALLBACK"); v != "" && fallbackSwitchRaw == "on" {
 		fallbackSwitchRaw = v
+	}
+	if v := os.Getenv("ECH_RESTART_AT"); v != "" && restartAtRaw == "05:00" {
+		restartAtRaw = v
 	}
 }
 
@@ -715,6 +722,11 @@ func runFallbackTunnel(conn, upstream net.Conn, oldConnID, clientAddr, target, m
 	connInfoObj, _ := activeConns.Load(connID)
 	connInfoPtr := connInfoObj.(*connInfo)
 
+	// 记录实际拨通的上游地址
+	if connInfoPtr != nil {
+		connInfoPtr.DialedAddr = upstream.RemoteAddr().String()
+	}
+
 	closeOnce := sync.Once{}
 	cleanup := func() {
 		closeOnce.Do(func() {
@@ -746,6 +758,54 @@ func runFallbackTunnel(conn, upstream net.Conn, oldConnID, clientAddr, target, m
 	removeConn(connID)
 	log.Printf("[兜底] %s 上游连接已断开: %s", clientAddr, target)
 	return nil
+}
+
+// startScheduledRestart 每日定时退出进程（配合容器 restart 策略自动拉起），
+// 用于清理长时间运行后的状态劣化（如吞吐劣化、连接悬挂）。时间取容器本地时区（TZ）。
+func startScheduledRestart() {
+	raw := strings.TrimSpace(restartAtRaw)
+	if raw == "" || strings.EqualFold(raw, "off") || raw == "0" || raw == "disabled" {
+		log.Printf("[定时重启] 已关闭（-restart-at / ECH_RESTART_AT = %q）", raw)
+		return
+	}
+	parts := strings.Split(raw, ":")
+	if len(parts) != 2 {
+		log.Printf("[警告] 定时重启时间格式无效 (%q)，已关闭（格式: HH:MM，off=关闭）", raw)
+		return
+	}
+	h, errH := strconv.Atoi(strings.TrimSpace(parts[0]))
+	m, errM := strconv.Atoi(strings.TrimSpace(parts[1]))
+	if errH != nil || errM != nil || h < 0 || h > 23 || m < 0 || m > 59 {
+		log.Printf("[警告] 定时重启时间无效 (%q)，已关闭（格式: HH:MM，off=关闭）", raw)
+		return
+	}
+
+	now := time.Now()
+	next := time.Date(now.Year(), now.Month(), now.Day(), h, m, 0, 0, now.Location())
+	if !next.After(now) {
+		next = next.Add(24 * time.Hour)
+	}
+	log.Printf("[定时重启] 已启用: 每日 %02d:%02d 自动重启，下次 %s", h, m, next.Format("2006-01-02 15:04:05"))
+
+	if d := time.Until(next); d > 0 {
+		time.Sleep(d)
+	}
+
+	log.Printf("[定时重启] 到达 %02d:%02d，正在自我重启刷新进程（不中断容器）...", h, m)
+	// 留出日志落盘/面板可见的时间
+	time.Sleep(500 * time.Millisecond)
+
+	// 进程内 re-exec：同 PID 原地替换镜像，旧状态清零，不依赖容器 restart 策略
+	if exe, err := os.Executable(); err == nil {
+		if err := selfRestart(exe); err != nil {
+			log.Printf("[警告] 定时重启: 自我重启失败（%v），退化为退出进程", err)
+		}
+	} else {
+		log.Printf("[警告] 定时重启: 获取可执行路径失败（%v），退化为退出进程", err)
+	}
+	// 仅 re-exec 失败时走到这里：退出进程（若容器有 restart 策略则由其拉起）
+	time.Sleep(500 * time.Millisecond)
+	os.Exit(0)
 }
 
 func main() {
@@ -926,6 +986,9 @@ func main() {
 
 	// 启动后台 IP 列表更新器（代理就绪后经隧道更新）
 	go startChinaIPBackgroundUpdater()
+
+	// 每日定时重启（默认 05:00，off 关闭）
+	go startScheduledRestart()
 
 	// 优雅退出
 	sigChan := make(chan os.Signal, 1)
@@ -3774,6 +3837,11 @@ func handleTunnel(conn net.Conn, target, clientAddr string, mode int, firstFrame
 		return fallbackOrFail("拨号失败: "+err.Error(), err)
 	}
 
+	// 记录实际拨通的远端地址 (ECH 隧道服务端)
+	if connInfoPtr != nil {
+		connInfoPtr.DialedAddr = wsConn.RemoteAddr().String()
+	}
+
 	var mu sync.Mutex
 	var closed atomic.Bool
 	closeOnce := sync.Once{}
@@ -4005,6 +4073,11 @@ func handleDirectConnection(conn net.Conn, target, clientAddr string, mode int, 
 		removeConn(connID)
 		sendErrorResponse(conn, mode)
 		return fmt.Errorf("直连失败: %w", err)
+	}
+
+	// 记录实际拨通的远端地址
+	if connInfoPtr != nil {
+		connInfoPtr.DialedAddr = targetConn.RemoteAddr().String()
 	}
 
 	// 对直连目标也启用 TCP_NODELAY

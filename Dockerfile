@@ -3,8 +3,8 @@ RUN apk add --no-cache git
 WORKDIR /build
 COPY go.mod go.sum ./
 RUN go mod download
-COPY ech-workers.go index.html ./
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o ech-workers ech-workers.go
+COPY *.go index.html ./
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o ech-workers .
 
 FROM alpine:3.19
 RUN apk add --no-cache ca-certificates tzdata

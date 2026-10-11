@@ -88,6 +88,7 @@ docker run -d --name ech-proxy --restart always \
 | `ECH_RECYCLE_DURATION` | `-recycle-duration` | `0`      | 单连接时长阈值，如 `30m`（`0`=关闭） |
 | `ECH_UPSTREAM` | `-upstream`   | （空）                  | ECH 失败时的兜底上游：`127.0.0.1:7890`（SOCKS5）、`socks5://127.0.0.1:7890`、`http://127.0.0.1:7891` |
 | `ECH_FALLBACK` | `-fallback`   | `on`                   | 兜底开关（`on`/`off`；需先配置 `-upstream`） |
+| `ECH_RESTART_AT` | `-restart-at` | `05:00`              | 每日定时重启（容器本地时区 `HH:MM`，`off`=关闭；进程内自重启，不需要容器 restart 策略） |
 | `ECH_RULES_DATA` | `-rules-data` | `/data/rules.json`    | 面板规则持久化文件（面板可编辑的规则桶） |
 | —              | `-rules`      | （空）                  | CSV 规则文件（只读桶，`routing=custom` 时加载；与面板规则合并生效，互不覆盖） |
 
@@ -109,6 +110,7 @@ docker run -d --name ech-proxy --restart always \
 | `-password` | `ECH_PASSWORD` | （空） | 面板登录密码 |
 | `-config` | `ECH_CONFIG` | `/data/config.json` | 配置文件路径 |
 | `-rules-data` | `ECH_RULES_DATA` | `/data/rules.json` | 规则持久化路径 |
+| `-restart-at` | `ECH_RESTART_AT` | `05:00` | 每日定时重启（`HH:MM` 本地时区，`off`=关闭；进程内 re-exec 自重启，同 PID 原地刷新，不依赖容器 restart 策略） |
 
 ---
 

@@ -421,6 +421,7 @@ select.theme-select:focus{outline:none;border-color:var(--cyan)}
           <th class="sortable" data-sort="id">ID <span class="sort-arrow"></span></th>
           <th class="sortable" data-sort="source">来源 <span class="sort-arrow"></span></th>
           <th class="sortable" data-sort="target">目标 <span class="sort-arrow"></span></th>
+          <th class="sortable" data-sort="dialed_addr">实拨地址 <span class="sort-arrow"></span></th>
           <th class="sortable" data-sort="mode">模式 <span class="sort-arrow"></span></th>
           <th class="sortable" data-sort="rule">规则 <span class="sort-arrow"></span></th>
           <th>命中</th>
@@ -428,7 +429,7 @@ select.theme-select:focus{outline:none;border-color:var(--cyan)}
           <th class="sortable" data-sort="download">下载 <span class="sort-arrow"></span></th>
           <th class="sortable" data-sort="start_time">开始时间 <span class="sort-arrow"></span></th>
         </tr></thead>
-        <tbody id="conn-table"><tr><td colspan="9" class="empty">暂无活跃连接</td></tr></tbody>
+        <tbody id="conn-table"><tr><td colspan="10" class="empty">暂无活跃连接</td></tr></tbody>
       </table>
     </div>
   </div>
@@ -687,8 +688,8 @@ async function loadConnections(){
   if(search)url+='&search='+encodeURIComponent(search);
   const conns=await api(url);
   const tbody=document.getElementById('conn-table');updateSortArrows();
-  if(!conns||conns.length===0){tbody.innerHTML='<tr><td colspan="9" class="empty">暂无活跃连接</td></tr>';return}
-  tbody.innerHTML=conns.map(c=>{const mode=escHtml(c.mode||'');const modeCls=mode.startsWith('sock')?'sock':'http';const rule=escHtml(c.rule||'');const ruleText=rule==='direct'?'直连':(rule==='clash'?'兜底':(rule==='upstream'?'上游':'代理'));return`<tr><td class="mono">${escHtml(c.id)}</td><td class="mono">${escHtml(c.source)}</td><td class="mono">${escHtml(c.target)}</td><td><span class="tag ${modeCls}">${mode}</span></td><td><span class="tag ${rule}">${ruleText}</span></td><td class="mono" title="${escHtml(c.matched||'')}">${escHtml(c.matched||'-')}</td><td class="mono">${fmtBytes(c.upload||0)}</td><td class="mono">${fmtBytes(c.download||0)}</td><td>${new Date(c.start_time).toLocaleTimeString()}</td></tr>`}).join('');
+  if(!conns||conns.length===0){tbody.innerHTML='<tr><td colspan="10" class="empty">暂无活跃连接</td></tr>';return}
+  tbody.innerHTML=conns.map(c=>{const mode=escHtml(c.mode||'');const modeCls=mode.startsWith('sock')?'sock':'http';const rule=escHtml(c.rule||'');const ruleText=rule==='direct'?'直连':(rule==='clash'?'兜底':(rule==='upstream'?'上游':'代理'));const dialed=escHtml(c.dialed_addr||'');return`<tr><td class="mono">${escHtml(c.id)}</td><td class="mono">${escHtml(c.source)}</td><td class="mono">${escHtml(c.target)}</td><td class="mono" title="${dialed}">${dialed||'-'}</td><td><span class="tag ${modeCls}">${mode}</span></td><td><span class="tag ${rule}">${ruleText}</span></td><td class="mono" title="${escHtml(c.matched||'')}">${escHtml(c.matched||'-')}</td><td class="mono">${fmtBytes(c.upload||0)}</td><td class="mono">${fmtBytes(c.download||0)}</td><td>${new Date(c.start_time).toLocaleTimeString()}</td></tr>`}).join('');
 }
 
 function setRulesDirty(d){rulesDirty=d;document.getElementById('rules-dirty').style.display=d?'':'none'}
