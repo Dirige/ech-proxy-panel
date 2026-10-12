@@ -7,10 +7,7 @@
   "ech_domain": "cloudflare-ech.com",
   "routing_mode": "bypass_cn",
   "web_addr": ":30001",
-  "proxy_ip": "",
   "web_password": "",
-  "upstream": "",
-  "fallback": "on",
-  "recycle_bytes": "800m",
-  "recycle_duration": "0"
+  "cfip_add": [],
+  "cfip_del": []
 }

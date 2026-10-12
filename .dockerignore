@@ -6,3 +6,5 @@ rules_data.txt
 ech-workers
 ech-workers-*
 *.log
+data/
+dist/

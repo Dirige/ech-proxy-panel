@@ -32,7 +32,6 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"golang.org/x/net/proxy"
 )
 
 //go:embed index.html
@@ -48,37 +47,13 @@ var (
 	dnsServer   string
 	echDomain   string
 	routingMode string // 分流模式: "global", "bypass_cn", "none", "custom"
-	webAddr     string // Web 管理面板监听地址
-	rulesFile   string // 自定义规则文件路径
-	rulesData   string // 面板规则持久化文件路径
-	configFile  string // 配置文件路径
-	proxyIP     string // 固定出口 IP（格式: ip 或 ip:port）
-	webPassword string // Web 管理面板登录密码（为空则不需登录）
+
+	webAddr      string // Web 管理面板监听地址
+	rulesFile    string // 自定义规则文件路径（只读桶）
+	rulesData    string // 面板规则持久化文件路径（可编辑桶）
+	configFile   string // 配置文件路径
+	webPassword  string // Web 管理面板登录密码（为空则不需登录）
 	restartAtRaw string // 每日定时重启时间 (HH:MM，off=关闭)
-
-	// ========== 长连接（视频）稳定性相关 ==========
-
-	// ========== 连接老化自愈（到量/到时主动断开重连） ==========
-	// CF 免费节点按 invocation 计资源，单条 WS 隧道搬运越多吞吐越低（老化），
-	// 服务端不可控，只能在阈值处主动断开，由播放器自动重连换一条新的 invocation。
-	recycleBytesRaw    string // 原始参数值（flag/env），由 parseRecycleOptions 解析
-	recycleDurationRaw string
-	recycleSwitchRaw   string
-	recycleBytes       int64         // 单连接累计流量阈值（字节），0 = 关闭
-	recycleDuration    time.Duration // 单连接存活时长阈值，0 = 关闭
-	recycleEnabled     bool          // 老化自愈总开关
-
-	// ========== Clash 上游兜底（ECH 隧道失败时自动改走本地 Clash） ==========
-	// ECH 隧道失败有两个时机：本地拨号连不上服务端、服务端回 ERROR（目标不可达）。
-	// 这两处客户端都还没收到成功握手，此时改用本地 Clash 上游，对客户端完全无感。
-	upstreamRaw       string // 上游地址原始值（flag/env），如 127.0.0.1:7890、socks5://、http://
-	fallbackSwitchRaw string // 兜底总开关原始值
-	upstreamAddr      string // 解析后的上游 host:port，空 = 未配置（兜底不生效）
-	upstreamKind      string // 上游协议: socks5 / http
-	upstreamUser      string // 上游账号（可空）
-	upstreamPass      string
-	upstreamSocks     proxy.Dialer // kind=socks5 时的拨号器
-	fallbackEnabled   bool         // 兜底总开关
 
 	// Web 会话管理
 	webSessions   map[string]time.Time // sessionID -> 过期时间
@@ -123,11 +98,12 @@ var (
 	cfipAdd []string
 	cfipDel []string
 
-	// DNS 解析结果缓存（bypass_cn 模式下避免重复查询）
+	// DNS 解析结果缓存（规则 ipcidr/cfip 匹配域名时避免重复查询）
 	dnsCache   map[string]dnsCacheEntry
 	dnsCacheMu sync.RWMutex
 )
 
+// dnsCacheEntry DNS 缓存条目
 type dnsCacheEntry struct {
 	ips       []net.IP
 	expiresAt time.Time
@@ -145,153 +121,6 @@ type ipRangeV6 struct {
 	end   [16]byte
 }
 
-// ========== Web 管理面板类型 ==========
-
-// connInfo 连接信息
-type connInfo struct {
-	ID         string
-	Source     string
-	Target     string
-	Mode       string
-	Rule       string
-	Matched    string // 命中依据（哪条规则 / 哪个分流模式），面板可观测
-	DialedAddr string // 实际拨通的远端地址
-	StartTime  time.Time
-	upload     atomic.Int64
-	download   atomic.Int64
-}
-
-// connInfoResp 用于 JSON 序列化的连接信息（不含 atomic 字段）
-type connInfoResp struct {
-	ID         string    `json:"id"`
-	Source     string    `json:"source"`
-	Target     string    `json:"target"`
-	Mode       string    `json:"mode"`
-	Rule       string    `json:"rule"`
-	Matched    string    `json:"matched"`
-	DialedAddr string    `json:"dialed_addr"`
-	Upload     int64     `json:"upload"`
-	Download   int64     `json:"download"`
-	StartTime  time.Time `json:"start_time"`
-}
-
-// logEntry 日志条目
-type logEntry struct {
-	Time  string `json:"time"`
-	Level string `json:"level"`
-	Msg   string `json:"msg"`
-}
-
-// customRule 自定义规则
-type customRule struct {
-	Type   string `json:"type"`   // domain, ipcidr, keyword, cfip
-	Value  string `json:"value"`  // 规则值（cfip 为可选备注，匹配只看内置 CF 段）
-	Action string `json:"action"` // proxy(ECH), direct, upstream(本地 socks/http)
-}
-
-// appConfig 应用配置
-type appConfig struct {
-	ListenAddr  string `json:"listen_addr"`
-	ServerAddr  string `json:"server_addr"`
-	ServerIP    string `json:"server_ip"`
-	Token       string `json:"token"`
-	DNSServer   string `json:"dns_server"`
-	ECHDomain   string `json:"ech_domain"`
-	RoutingMode string `json:"routing_mode"`
-	WebAddr     string `json:"web_addr"`
-	ProxyIP     string `json:"proxy_ip"`
-	WebPassword string `json:"web_password"`
-	Upstream    string `json:"upstream"`
-	Fallback    string `json:"fallback"`
-	CfipAdd     []string `json:"cfip_add"`
-	CfipDel     []string `json:"cfip_del"`
-	RecycleBytes    string `json:"recycle_bytes"`
-	RecycleDuration string `json:"recycle_duration"`
-}
-
-// loadConfig 从文件加载配置
-func loadConfig(filePath string) (*appConfig, error) {
-	data, err := os.ReadFile(filePath)
-	if err != nil {
-		return nil, err
-	}
-	var cfg appConfig
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return nil, err
-	}
-	return &cfg, nil
-}
-
-// saveConfig 保存配置到文件
-func saveConfig(filePath string) error {
-	cfg := appConfig{
-		ListenAddr:  listenAddr,
-		ServerAddr:  serverAddr,
-		ServerIP:    serverIP,
-		Token:       token,
-		DNSServer:   dnsServer,
-		ECHDomain:   echDomain,
-		RoutingMode: routingMode,
-		WebAddr:     webAddr,
-		ProxyIP:     proxyIP,
-		WebPassword: webPassword,
-		Upstream:    upstreamRaw,
-		Fallback:    fallbackSwitchRaw,
-		CfipAdd:     cfipAdd,
-		CfipDel:     cfipDel,
-		RecycleBytes:    recycleBytesRaw,
-		RecycleDuration: recycleDurationRaw,
-	}
-	data, err := json.MarshalIndent(cfg, "", "  ")
-	if err != nil {
-		return err
-	}
-	if dir := filepath.Dir(filePath); dir != "" && dir != "." {
-		if err := os.MkdirAll(dir, 0755); err != nil {
-			return fmt.Errorf("创建配置目录失败: %w", err)
-		}
-	}
-	return os.WriteFile(filePath, data, 0600)
-}
-
-// appVersion 面板与镜像版本号（发版时同步改这里 + workflow tag）
-const appVersion = "1.3"
-
-// validHostPort 校验 host:port 格式（:30001、0.0.0.0:30000、example.com:443 均合法）
-func validHostPort(s string) bool {
-	_, port, err := net.SplitHostPort(s)
-	return err == nil && port != ""
-}
-
-// normalizeWebAddr 面板地址宽容输入：纯端口（如 "30001"）补成 ":30001"，其余原样返回
-func normalizeWebAddr(s string) string {
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return s
-	}
-	if _, err := strconv.Atoi(s); err == nil {
-		return ":" + s
-	}
-	return s
-}
-
-// statusResponse 状态响应
-type statusResponse struct {
-	Version      string  `json:"version"`
-	Uptime       string  `json:"uptime"`
-	TotalConns   int64   `json:"total_conns"`
-	ActiveConns  int     `json:"active_conns"`
-	TotalUpload  int64   `json:"total_upload"`
-	TotalDownload int64  `json:"total_download"`
-	RoutingMode  string  `json:"routing_mode"`
-	ListenAddr   string  `json:"listen_addr"`
-	ServerAddr   string  `json:"server_addr"`
-	ECHDomain    string  `json:"ech_domain"`
-	WebAddr      string  `json:"web_addr"`
-	CustomRules  int     `json:"custom_rules"`
-	MemoryMB     float64 `json:"memory_mb"`
-}
-
 func init() {
 	flag.StringVar(&listenAddr, "l", "0.0.0.0:30000", "代理监听地址 (支持 SOCKS5 和 HTTP)")
 	flag.StringVar(&serverAddr, "f", "hhech.nb1tap.kdns.fr:443", "服务端地址 (格式: x.x.workers.dev:443)")
@@ -301,511 +130,11 @@ func init() {
 	flag.StringVar(&echDomain, "ech", "cloudflare-ech.com", "ECH 查询域名")
 	flag.StringVar(&routingMode, "routing", "bypass_cn", "分流模式: global(全局代理), bypass_cn(跳过中国大陆), none(不改变代理), custom(自定义规则)")
 	flag.StringVar(&webAddr, "web", "", "Web 管理面板监听地址 (如 :30001)")
-	flag.StringVar(&rulesFile, "rules", "", "自定义规则文件路径 (routing=custom 时必需)")
+	flag.StringVar(&rulesFile, "rules", "", "自定义规则文件路径 (type,value,action CSV，只读)")
 	flag.StringVar(&rulesData, "rules-data", "/data/rules.json", "面板规则持久化文件路径")
 	flag.StringVar(&configFile, "config", "/data/config.json", "配置文件路径")
-	flag.StringVar(&proxyIP, "proxyip", "", "固定出口 IP (如 101.79.165.113 或 101.79.165.113:443)")
 	flag.StringVar(&webPassword, "password", "", "Web 管理面板登录密码 (为空则不需登录)")
-	flag.StringVar(&recycleBytesRaw, "recycle-bytes", "800m", "连接流量回收阈值（如 512m/2g，0=关），达到后主动断开等待播放器重连")
-	flag.StringVar(&recycleDurationRaw, "recycle-duration", "0", "连接存活时长回收阈值（如 30m，0=关），达到后主动断开等待播放器重连")
-	flag.StringVar(&recycleSwitchRaw, "recycle", "on", "老化自愈总开关: on/off")
-	flag.StringVar(&upstreamRaw, "upstream", "", "ECH 隧道失败时的兜底上游 (如 127.0.0.1:7890、socks5://127.0.0.1:7890、http://127.0.0.1:7891，留空=不兜底)")
-	flag.StringVar(&fallbackSwitchRaw, "fallback", "on", "兜底总开关: on/off")
 	flag.StringVar(&restartAtRaw, "restart-at", "05:00", "每日定时重启 (本地时区 HH:MM，off=关闭，进程内自重启不中断容器)")
-}
-
-// applyEnvDefaults 从环境变量加载默认值（命令行参数优先）
-// 支持: ECH_LISTEN, ECH_SERVER, ECH_SERVER_IP, ECH_TOKEN, ECH_DNS, ECH_DOMAIN,
-//        ECH_ROUTING, ECH_WEB, ECH_PROXY_IP, ECH_PASSWORD, ECH_CONFIG, ECH_RULES_DATA
-func applyEnvDefaults() {
-	if v := os.Getenv("ECH_LISTEN"); v != "" && listenAddr == "0.0.0.0:30000" {
-		listenAddr = v
-	}
-	if v := os.Getenv("ECH_SERVER"); v != "" && serverAddr == "hhech.nb1tap.kdns.fr:443" {
-		serverAddr = v
-	}
-	if v := os.Getenv("ECH_SERVER_IP"); v != "" && serverIP == "" {
-		serverIP = v
-	}
-	if v := os.Getenv("ECH_TOKEN"); v != "" && token == "honghongfree" {
-		token = v
-	}
-	if v := os.Getenv("ECH_DNS"); v != "" && dnsServer == "dns.alidns.com/dns-query" {
-		dnsServer = v
-	}
-	if v := os.Getenv("ECH_DOMAIN"); v != "" && echDomain == "cloudflare-ech.com" {
-		echDomain = v
-	}
-	if v := os.Getenv("ECH_ROUTING"); v != "" && routingMode == "bypass_cn" {
-		routingMode = v
-	}
-	if v := os.Getenv("ECH_WEB"); v != "" && webAddr == "" {
-		webAddr = v
-	}
-	if v := os.Getenv("ECH_PROXY_IP"); v != "" && proxyIP == "" {
-		proxyIP = v
-	}
-	if v := os.Getenv("ECH_PASSWORD"); v != "" && webPassword == "" {
-		webPassword = v
-	}
-	if v := os.Getenv("ECH_CONFIG"); v != "" && configFile == "/data/config.json" {
-		configFile = v
-	}
-	if v := os.Getenv("ECH_RULES_DATA"); v != "" && rulesData == "/data/rules.json" {
-		rulesData = v
-	}
-	if v := os.Getenv("ECH_RECYCLE_BYTES"); v != "" && recycleBytesRaw == "800m" {
-		recycleBytesRaw = v
-	}
-	if v := os.Getenv("ECH_RECYCLE_DURATION"); v != "" && recycleDurationRaw == "0" {
-		recycleDurationRaw = v
-	}
-	if v := os.Getenv("ECH_RECYCLE"); v != "" && recycleSwitchRaw == "on" {
-		recycleSwitchRaw = v
-	}
-	if v := os.Getenv("ECH_UPSTREAM"); v != "" && upstreamRaw == "" {
-		upstreamRaw = v
-	}
-	if v := os.Getenv("ECH_FALLBACK"); v != "" && fallbackSwitchRaw == "on" {
-		fallbackSwitchRaw = v
-	}
-	if v := os.Getenv("ECH_RESTART_AT"); v != "" && restartAtRaw == "05:00" {
-		restartAtRaw = v
-	}
-}
-
-// parseSize 解析容量字符串：纯数字 = 字节，支持 k/m/g 后缀（1024 进制），允许小数如 0.5g
-func parseSize(s string) (int64, error) {
-	s = strings.TrimSpace(strings.ToLower(s))
-	if s == "" || s == "0" {
-		return 0, nil
-	}
-	mult := int64(1)
-	switch {
-	case strings.HasSuffix(s, "g"):
-		mult = 1024 * 1024 * 1024
-		s = strings.TrimSuffix(s, "g")
-	case strings.HasSuffix(s, "m"):
-		mult = 1024 * 1024
-		s = strings.TrimSuffix(s, "m")
-	case strings.HasSuffix(s, "k"):
-		mult = 1024
-		s = strings.TrimSuffix(s, "k")
-	}
-	f, err := strconv.ParseFloat(s, 64)
-	if err != nil || f < 0 {
-		return 0, errors.New("无效的容量值")
-	}
-	return int64(f * float64(mult)), nil
-}
-
-// parseRecycleOptions 解析老化自愈参数。
-// 软失败策略：任何非法输入只打警告并保持默认值，绝不让服务启动失败。
-func parseRecycleOptions() {
-	v := strings.ToLower(strings.TrimSpace(recycleSwitchRaw))
-	switch v {
-	case "on", "1", "true":
-		recycleEnabled = true
-	case "off", "0", "false":
-		recycleEnabled = false
-	default:
-		log.Printf("[警告] -recycle 值无效 %q，保持默认 on", recycleSwitchRaw)
-		recycleEnabled = true
-	}
-
-	if n, err := parseSize(recycleBytesRaw); err != nil {
-		log.Printf("[警告] -recycle-bytes 值无效 %q，保持默认 800m", recycleBytesRaw)
-		recycleBytes = 800 * 1024 * 1024
-	} else {
-		recycleBytes = n
-	}
-
-	rawDur := strings.TrimSpace(recycleDurationRaw)
-	if rawDur == "" || rawDur == "0" {
-		recycleDuration = 0
-	} else if d, err := time.ParseDuration(rawDur); err != nil || d < 0 {
-		log.Printf("[警告] -recycle-duration 值无效 %q，保持默认 0（关闭）", recycleDurationRaw)
-		recycleDuration = 0
-	} else {
-		recycleDuration = d
-	}
-}
-
-// formatBytes 人类可读的字节数（日志用）
-func formatBytes(b int64) string {
-	const unit = 1024
-	if b < unit {
-		return fmt.Sprintf("%d B", b)
-	}
-	div, exp := int64(unit), 0
-	for n := b / unit; n >= unit; n /= unit {
-		div *= unit
-		exp++
-	}
-	return fmt.Sprintf("%.1f %ciB", float64(b)/float64(div), "KMGTPE"[exp])
-}
-
-// ======================== Clash 上游兜底 ========================
-
-// parseUpstream 解析 -upstream 参数，返回协议、host:port、账号密码。
-// 软失败：任何非法输入返回错误，由调用方打警告，绝不让服务启动失败。
-func parseUpstream(raw string) (kind, addr, user, pass string, err error) {
-	s := strings.TrimSpace(raw)
-	if s == "" {
-		return "", "", "", "", errors.New("地址为空")
-	}
-	if !strings.Contains(s, "://") {
-		s = "socks5://" + s // 不带 scheme 默认按 SOCKS5（Clash mixed-port 同时支持 SOCKS5 和 HTTP）
-	}
-	u, err := url.Parse(s)
-	if err != nil {
-		return "", "", "", "", err
-	}
-	switch strings.ToLower(u.Scheme) {
-	case "socks5", "socks5h":
-		kind = "socks5"
-	case "http":
-		kind = "http"
-	case "https":
-		return "", "", "", "", errors.New("暂不支持 https 上游（可改用 http:// 或 socks5://）")
-	default:
-		return "", "", "", "", fmt.Errorf("不支持的协议 %q", u.Scheme)
-	}
-	if u.Host == "" {
-		return "", "", "", "", errors.New("缺少地址")
-	}
-	if _, _, e := net.SplitHostPort(u.Host); e != nil {
-		return "", "", "", "", errors.New("缺少端口（如 127.0.0.1:7890）")
-	}
-	if u.User != nil {
-		user = u.User.Username()
-		pass, _ = u.User.Password()
-	}
-	return kind, u.Host, user, pass, nil
-}
-
-// parseFallbackOptions 解析上游兜底参数。
-// 软失败策略：任何非法输入只打警告并保持默认值，绝不让服务启动失败。
-func parseFallbackOptions() {
-	v := strings.ToLower(strings.TrimSpace(fallbackSwitchRaw))
-	switch v {
-	case "on", "1", "true":
-		fallbackEnabled = true
-	case "off", "0", "false":
-		fallbackEnabled = false
-	default:
-		log.Printf("[警告] -fallback 值无效 %q，保持默认 on", fallbackSwitchRaw)
-		fallbackEnabled = true
-	}
-
-	kind, addr, user, pass, err := parseUpstream(upstreamRaw)
-	if err != nil {
-		if strings.TrimSpace(upstreamRaw) != "" {
-			log.Printf("[警告] -upstream 值无效 %q（%v），不启用兜底", upstreamRaw, err)
-		}
-		return
-	}
-	upstreamKind, upstreamAddr, upstreamUser, upstreamPass = kind, addr, user, pass
-
-	if kind == "socks5" {
-		var auth *proxy.Auth
-		if user != "" {
-			auth = &proxy.Auth{User: user, Password: pass}
-		}
-		d, err := proxy.SOCKS5("tcp", addr, auth, nil)
-		if err != nil {
-			log.Printf("[警告] -upstream 值无效 %q（%v），不启用兜底", upstreamRaw, err)
-			upstreamAddr, upstreamKind = "", ""
-			return
-		}
-		upstreamSocks = d
-	}
-}
-
-// dialUpstream 通过本地上游（Clash）连接目标，整体 15s 超时
-func dialUpstream(target string) (net.Conn, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	switch upstreamKind {
-	case "socks5":
-		if upstreamSocks == nil {
-			return nil, errors.New("上游拨号器未初始化")
-		}
-		if cd, ok := upstreamSocks.(proxy.ContextDialer); ok {
-			return cd.DialContext(ctx, "tcp", target)
-		}
-		// 理论上 SOCKS5 拨号器总是实现 ContextDialer，这里只做保底
-		type res struct {
-			c net.Conn
-			e error
-		}
-		ch := make(chan res, 1)
-		go func() {
-			c, e := upstreamSocks.Dial("tcp", target)
-			ch <- res{c, e}
-		}()
-		select {
-		case r := <-ch:
-			return r.c, r.e
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		}
-	case "http":
-		return dialHTTPConnect(ctx, upstreamAddr, target, upstreamUser, upstreamPass)
-	}
-	return nil, errors.New("未配置上游")
-}
-
-// dialHTTPConnect 自写的 HTTP CONNECT 拨号（走 Clash 的 http 端口）
-func dialHTTPConnect(ctx context.Context, upstream, target, user, pass string) (net.Conn, error) {
-	var nd net.Dialer
-	conn, err := nd.DialContext(ctx, "tcp", upstream)
-	if err != nil {
-		return nil, fmt.Errorf("连接上游失败: %w", err)
-	}
-	if dl, ok := ctx.Deadline(); ok {
-		conn.SetDeadline(dl)
-	}
-
-	var req strings.Builder
-	fmt.Fprintf(&req, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n", target, target)
-	if user != "" {
-		cred := base64.StdEncoding.EncodeToString([]byte(user + ":" + pass))
-		fmt.Fprintf(&req, "Proxy-Authorization: Basic %s\r\n", cred)
-	}
-	req.WriteString("Proxy-Connection: keep-alive\r\n\r\n")
-	if _, err := io.WriteString(conn, req.String()); err != nil {
-		conn.Close()
-		return nil, fmt.Errorf("发送 CONNECT 失败: %w", err)
-	}
-
-	// 逐字节读到 \r\n\r\n：不能用 bufio，否则隧道首包可能被它的缓冲吞掉
-	var header []byte
-	one := make([]byte, 1)
-	for {
-		n, err := conn.Read(one)
-		if err != nil {
-			conn.Close()
-			return nil, fmt.Errorf("读取上游响应失败: %w", err)
-		}
-		if n == 0 {
-			conn.Close()
-			return nil, errors.New("读取上游响应失败: 连接被关闭")
-		}
-		header = append(header, one[0])
-		if len(header) >= 4 && bytes.Equal(header[len(header)-4:], []byte("\r\n\r\n")) {
-			break
-		}
-		if len(header) > 64*1024 {
-			conn.Close()
-			return nil, errors.New("上游响应头过长")
-		}
-	}
-	conn.SetDeadline(time.Time{})
-
-	line := string(header[:bytes.IndexByte(header, '\r')])
-	fields := strings.Fields(line)
-	if len(fields) < 2 || fields[1] != "200" {
-		conn.Close()
-		return nil, fmt.Errorf("上游拒绝: %s", line)
-	}
-	return conn, nil
-}
-
-// dialFallback 兜底拨号：未配置或拨号失败返回 nil（调用方走原有报错路径）
-func dialFallback(clientAddr, target, reason string) net.Conn {
-	if !fallbackEnabled || upstreamAddr == "" {
-		return nil
-	}
-	up, err := dialUpstream(target)
-	if err != nil {
-		log.Printf("[兜底] %s ECH 隧道失败（%s），兜底也失败（上游 %s: %v）", clientAddr, reason, upstreamAddr, err)
-		return nil
-	}
-	log.Printf("[兜底] %s ECH 隧道失败（%s），改走上游 %s: %s", clientAddr, reason, upstreamAddr, target)
-	return up
-}
-
-// dialUpstreamForRule 规则命中 upstream 出站时的拨号：未配置或拨号失败返回 nil（调用方回退 ECH）。
-// 与 dialFallback 的区别：这里不是兜底，是规则指定的第一出站，且不受 -fallback 开关影响。
-func dialUpstreamForRule(clientAddr, target string) net.Conn {
-	if upstreamAddr == "" {
-		log.Printf("[上游] %s 规则命中 upstream 出站但未配置 -upstream，回退 ECH: %s", clientAddr, target)
-		return nil
-	}
-	up, err := dialUpstream(target)
-	if err != nil {
-		log.Printf("[上游] %s 本地代理 %s 不可用（%v），回退 ECH: %s", clientAddr, upstreamAddr, err, target)
-		return nil
-	}
-	return up
-}
-
-// writeFull 写完整个缓冲，短写按错误处理
-func writeFull(c net.Conn, b []byte) error {
-	for len(b) > 0 {
-		n, err := c.Write(b)
-		if err != nil {
-			return err
-		}
-		if n == 0 {
-			return io.ErrShortWrite
-		}
-		b = b[n:]
-	}
-	return nil
-}
-
-// relayRaw 在客户端连接与上游连接之间双向转发，流量计入 connInfoPtr。
-// 任一方向结束即返回，连接的关闭由调用方负责（与直连路径一致）。
-func relayRaw(conn, upstream net.Conn, connInfoPtr *connInfo) {
-	// done 带缓冲 + 阻塞发送，理由同 handleTunnel：恰好 2 个发送方，缓冲 2 保证不阻塞。
-	done := make(chan struct{}, 2)
-
-	// Client -> Upstream
-	go func() {
-		defer func() { done <- struct{}{} }()
-		buf := make([]byte, 65536)
-		for {
-			n, err := conn.Read(buf)
-			if err != nil {
-				return
-			}
-			connInfoPtr.upload.Add(int64(n))
-			if err := writeFull(upstream, buf[:n]); err != nil {
-				return
-			}
-		}
-	}()
-
-	// Upstream -> Client
-	go func() {
-		defer func() { done <- struct{}{} }()
-		buf := make([]byte, 65536)
-		for {
-			n, err := upstream.Read(buf)
-			if err != nil {
-				return
-			}
-			connInfoPtr.download.Add(int64(n))
-			if err := writeFull(conn, buf[:n]); err != nil {
-				return
-			}
-		}
-	}()
-
-	<-done
-}
-
-// runFallbackTunnel 用上游连接接管客户端：重新登记（ruleLabel：clash=ECH失败兜底 / upstream=规则出站）、
-// 回成功握手、双向转发、收尾。调用点是客户端尚未收到握手响应的位置，因此对客户端无感。
-func runFallbackTunnel(conn, upstream net.Conn, oldConnID, clientAddr, target, modeStr string, mode int, firstFrame, matchedRule, ruleLabel string) error {
-	// SOCKS5 的首帧此时可能还没读（ECH 路径也是拨号成功后才读），逻辑保持一致
-	if firstFrame == "" && mode == modeSOCKS5 {
-		_ = conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
-		buffer := make([]byte, 65536)
-		n, _ := conn.Read(buffer)
-		_ = conn.SetReadDeadline(time.Time{})
-		if n > 0 {
-			firstFrame = string(buffer[:n])
-		}
-	}
-
-	// 先删后加：避免并发读写 Rule 字段造成数据竞争，同时按出站类型标注规则
-	if oldConnID != "" {
-		removeConn(oldConnID)
-	}
-	if ruleLabel == "" {
-		ruleLabel = "clash"
-	}
-	connID := addConn(clientAddr, target, modeStr, ruleLabel, matchedRule)
-	connInfoObj, _ := activeConns.Load(connID)
-	connInfoPtr := connInfoObj.(*connInfo)
-
-	// 记录实际拨通的上游地址
-	if connInfoPtr != nil {
-		connInfoPtr.DialedAddr = upstream.RemoteAddr().String()
-	}
-
-	closeOnce := sync.Once{}
-	cleanup := func() {
-		closeOnce.Do(func() {
-			upstream.Close()
-			conn.Close()
-		})
-	}
-	defer cleanup()
-
-	conn.SetDeadline(time.Time{})
-
-	// 发送成功响应（根据模式不同而不同）
-	if err := sendSuccessResponse(conn, mode); err != nil {
-		removeConn(connID)
-		return err
-	}
-
-	// 预设的第一帧先发给上游
-	if firstFrame != "" {
-		if err := writeFull(upstream, []byte(firstFrame)); err != nil {
-			removeConn(connID)
-			return fmt.Errorf("发送首帧失败: %w", err)
-		}
-	}
-
-	relayRaw(conn, upstream, connInfoPtr)
-
-	cleanup()
-	removeConn(connID)
-	log.Printf("[兜底] %s 上游连接已断开: %s", clientAddr, target)
-	return nil
-}
-
-// startScheduledRestart 每日定时退出进程（配合容器 restart 策略自动拉起），
-// 用于清理长时间运行后的状态劣化（如吞吐劣化、连接悬挂）。时间取容器本地时区（TZ）。
-func startScheduledRestart() {
-	raw := strings.TrimSpace(restartAtRaw)
-	if raw == "" || strings.EqualFold(raw, "off") || raw == "0" || raw == "disabled" {
-		log.Printf("[定时重启] 已关闭（-restart-at / ECH_RESTART_AT = %q）", raw)
-		return
-	}
-	parts := strings.Split(raw, ":")
-	if len(parts) != 2 {
-		log.Printf("[警告] 定时重启时间格式无效 (%q)，已关闭（格式: HH:MM，off=关闭）", raw)
-		return
-	}
-	h, errH := strconv.Atoi(strings.TrimSpace(parts[0]))
-	m, errM := strconv.Atoi(strings.TrimSpace(parts[1]))
-	if errH != nil || errM != nil || h < 0 || h > 23 || m < 0 || m > 59 {
-		log.Printf("[警告] 定时重启时间无效 (%q)，已关闭（格式: HH:MM，off=关闭）", raw)
-		return
-	}
-
-	now := time.Now()
-	next := time.Date(now.Year(), now.Month(), now.Day(), h, m, 0, 0, now.Location())
-	if !next.After(now) {
-		next = next.Add(24 * time.Hour)
-	}
-	log.Printf("[定时重启] 已启用: 每日 %02d:%02d 自动重启，下次 %s", h, m, next.Format("2006-01-02 15:04:05"))
-
-	if d := time.Until(next); d > 0 {
-		time.Sleep(d)
-	}
-
-	log.Printf("[定时重启] 到达 %02d:%02d，正在自我重启刷新进程（不中断容器）...", h, m)
-	// 留出日志落盘/面板可见的时间
-	time.Sleep(500 * time.Millisecond)
-
-	// 进程内 re-exec：同 PID 原地替换镜像，旧状态清零，不依赖容器 restart 策略
-	if exe, err := os.Executable(); err == nil {
-		if err := selfRestart(exe); err != nil {
-			log.Printf("[警告] 定时重启: 自我重启失败（%v），退化为退出进程", err)
-		}
-	} else {
-		log.Printf("[警告] 定时重启: 获取可执行路径失败（%v），退化为退出进程", err)
-	}
-	// 仅 re-exec 失败时走到这里：退出进程（若容器有 restart 策略则由其拉起）
-	time.Sleep(500 * time.Millisecond)
-	os.Exit(0)
 }
 
 func main() {
@@ -813,12 +142,6 @@ func main() {
 
 	// 环境变量（命令行参数优先，环境变量其次，config.json 最后）
 	applyEnvDefaults()
-
-	// 解析老化自愈参数（软失败：非法输入只警告，不影响启动）
-	parseRecycleOptions()
-
-	// 解析上游兜底参数（软失败：非法输入只警告，不影响启动）
-	parseFallbackOptions()
 
 	// 加载配置文件（命令行参数 > 环境变量 > config.json）
 	if cfg, err := loadConfig(configFile); err == nil {
@@ -847,17 +170,8 @@ func main() {
 		if webAddr == "" && cfg.WebAddr != "" {
 			webAddr = cfg.WebAddr
 		}
-		if proxyIP == "" && cfg.ProxyIP != "" {
-			proxyIP = cfg.ProxyIP
-		}
 		if webPassword == "" && cfg.WebPassword != "" {
 			webPassword = cfg.WebPassword
-		}
-		if upstreamRaw == "" && cfg.Upstream != "" {
-			upstreamRaw = cfg.Upstream
-		}
-		if fallbackSwitchRaw == "on" && cfg.Fallback != "" {
-			fallbackSwitchRaw = cfg.Fallback
 		}
 		if cfg.CfipAdd != nil {
 			cfipAdd = cfg.CfipAdd
@@ -865,17 +179,11 @@ func main() {
 		if cfg.CfipDel != nil {
 			cfipDel = cfg.CfipDel
 		}
-		if recycleBytesRaw == "800m" && cfg.RecycleBytes != "" {
-			recycleBytesRaw = cfg.RecycleBytes
-		}
-		if recycleDurationRaw == "0" && cfg.RecycleDuration != "" {
-			recycleDurationRaw = cfg.RecycleDuration
-		}
 	} else if configFile != "" {
 		log.Printf("[启动] 配置文件不存在或无效，使用命令行参数")
 	}
 
-	// 如果没有配置文件且命令行有参数，自动保存配置
+	// 没有配置文件时把当前参数落盘，供面板在线修改
 	if _, err := os.Stat(configFile); os.IsNotExist(err) {
 		if serverAddr != "" {
 			if err := saveConfig(configFile); err != nil {
@@ -886,9 +194,7 @@ func main() {
 		}
 	}
 
-	// 配置文件里的上游/兜底开关/CF增减量/老化阈值在解析之后加载，需重新应用一次使其生效
-	parseFallbackOptions()
-	parseRecycleOptions()
+	// 应用 CF 网段增减量
 	rebuildCFNets()
 
 	// 面板默认监听 :30001（可用 -web / ECH_WEB / 配置文件 web_addr 覆盖）
@@ -905,75 +211,72 @@ func main() {
 	log.Printf("[启动] 正在获取 ECH 配置...")
 	if err := prepareECH(); err != nil {
 		log.Printf("[警告] 获取 ECH 配置失败: %v", err)
-		log.Printf("[警告] 代理仍会启动（直连与面板可用，走 ECH 的连接将失败），后台每 30 秒重试获取 ECH")
+		log.Printf("[警告] 代理仍会启动（直连与面板可用，走代理的连接将失败），后台每 30 秒重试获取 ECH")
 		go retryECHLoop()
 	}
 
-	// 初始化统计
+	// 初始化统计与日志缓冲
 	startTime = time.Now()
 	logBuffer = make([]logEntry, 0, 200)
 	dnsCache = make(map[string]dnsCacheEntry)
 
-	// 设置日志同时写入缓冲区
+	// 日志同时写入缓冲区（面板日志页读取）
 	log.SetOutput(&logWriter{original: os.Stderr})
-	log.Printf("[测试] 日志系统已初始化")
 
-	// 加载自定义规则
-	if routingMode == "custom" {
-		if rulesFile == "" {
-			log.Fatal("[启动] custom 分流模式需要指定规则文件 -rules")
-		}
+	// 加载自定义规则：-rules CSV（只读桶） + 面板 rules.json（可编辑桶）
+	if rulesFile != "" {
 		if err := loadCustomRules(rulesFile); err != nil {
-			log.Fatalf("[启动] 加载自定义规则失败: %v", err)
-		}
-		customRulesMu.RLock()
-		log.Printf("[启动] 已加载 %d 条自定义规则", len(customRules))
-		customRulesMu.RUnlock()
-	}
-
-	// 加载中国IP列表（始终加载，供分流和后台更新使用）
-	{
-		ipv4Count := 0
-		ipv6Count := 0
-
-		if err := loadChinaIPList(); err != nil {
-			log.Printf("[警告] 加载中国IPv4列表失败: %v", err)
-		} else {
-			chinaIPRangesMu.RLock()
-			ipv4Count = len(chinaIPRanges)
-			chinaIPRangesMu.RUnlock()
-		}
-
-		if err := loadChinaIPV6List(); err != nil {
-			log.Printf("[警告] 加载中国IPv6列表失败: %v", err)
-		} else {
-			chinaIPV6RangesMu.RLock()
-			ipv6Count = len(chinaIPV6Ranges)
-			chinaIPV6RangesMu.RUnlock()
-		}
-
-		if ipv4Count > 0 || ipv6Count > 0 {
-			log.Printf("[启动] 已加载 %d 个中国IPv4段, %d 个中国IPv6段", ipv4Count, ipv6Count)
-		} else {
-			log.Printf("[警告] 未加载到任何中国IP列表")
+			log.Printf("[警告] 加载自定义规则失败: %v", err)
 		}
 	}
-
-	// ProxyIP 提示
-	if proxyIP != "" {
-		log.Printf("[启动] 固定出口 IP: %s", proxyIP)
-	}
-
-	// 启动出口IP检测
-	log.Printf("[启动] 启动出口IP检测器...")
-
-	// 加载面板规则持久化文件
 	loadRulesDataFile()
 
-	startExitInfoDetector()
+	// 中国 IP 列表：总是加载（bypass_cn 依赖；面板运行时把模式切成 bypass_cn 也能立即生效）
+	ipv4Count := 0
+	ipv6Count := 0
 
-	// 初始化 web 会话管理
+	if err := loadChinaIPList(); err != nil {
+		log.Printf("[警告] 加载中国IPv4列表失败: %v", err)
+	} else {
+		chinaIPRangesMu.RLock()
+		ipv4Count = len(chinaIPRanges)
+		chinaIPRangesMu.RUnlock()
+	}
+
+	if err := loadChinaIPV6List(); err != nil {
+		log.Printf("[警告] 加载中国IPv6列表失败: %v", err)
+	} else {
+		chinaIPV6RangesMu.RLock()
+		ipv6Count = len(chinaIPV6Ranges)
+		chinaIPV6RangesMu.RUnlock()
+	}
+
+	if ipv4Count > 0 || ipv6Count > 0 {
+		log.Printf("[启动] 已加载 %d 个中国IPv4段, %d 个中国IPv6段", ipv4Count, ipv6Count)
+	} else {
+		log.Printf("[警告] 未加载到任何中国IP列表，bypass_cn 模式下海外判定将失效（全部走代理）")
+	}
+
+	// 分流模式
+	switch routingMode {
+	case "bypass_cn":
+		log.Printf("[启动] 分流模式: 跳过中国大陆")
+	case "global":
+		log.Printf("[启动] 分流模式: 全局代理")
+	case "none":
+		log.Printf("[启动] 分流模式: 不改变代理（直连模式）")
+	case "custom":
+		log.Printf("[启动] 分流模式: 自定义规则（未命中规则时默认走代理）")
+	default:
+		log.Printf("[警告] 未知的分流模式: %s，使用默认模式 global", routingMode)
+		routingMode = "global"
+	}
+
+	// 初始化 Web 会话
 	webSessions = make(map[string]time.Time)
+
+	// 启动出口IP检测（概览页按需检测）
+	startExitInfoDetector()
 
 	// 启动 Web 管理面板（地址非法时回退 :30001，避免面板静默死亡）
 	if webAddr != "" && !validHostPort(webAddr) {
@@ -983,9 +286,6 @@ func main() {
 	if webAddr != "" {
 		go startWebServer(webAddr)
 	}
-
-	// 启动后台 IP 列表更新器（代理就绪后经隧道更新）
-	go startChinaIPBackgroundUpdater()
 
 	// 每日定时重启（默认 05:00，off 关闭）
 	go startScheduledRestart()
@@ -1000,31 +300,6 @@ func main() {
 	}()
 
 	runProxyServer(listenAddr)
-}
-
-// ======================== 日志缓冲 ========================
-
-type logWriter struct {
-	original io.Writer
-}
-
-func (w *logWriter) Write(p []byte) (n int, err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			w.original.Write([]byte(fmt.Sprintf("[logWriter panic: %v]\n", r)))
-		}
-	}()
-	msg := strings.TrimSpace(string(p))
-	if msg != "" {
-		level := "info"
-		if strings.Contains(msg, "[警告]") || strings.Contains(msg, "warn") {
-			level = "warn"
-		} else if strings.Contains(msg, "[错误]") || strings.Contains(msg, "fatal") || strings.Contains(msg, "error") {
-			level = "error"
-		}
-		addLog(level, msg)
-	}
-	return w.original.Write(p)
 }
 
 // ======================== 工具函数 ========================
@@ -1055,7 +330,20 @@ func isChinaIP(ipStr string) bool {
 		chinaIPRangesMu.RLock()
 		defer chinaIPRangesMu.RUnlock()
 
-		return findIPv4Range(chinaIPRanges, ipUint32)
+		// 二分查找
+		left, right := 0, len(chinaIPRanges)
+		for left < right {
+			mid := (left + right) / 2
+			r := chinaIPRanges[mid]
+			if ipUint32 < r.start {
+				right = mid
+			} else if ipUint32 > r.end {
+				left = mid + 1
+			} else {
+				return true
+			}
+		}
+		return false
 	}
 
 	// 检查IPv6
@@ -1141,212 +429,7 @@ func downloadIPList(url, filePath string) error {
 	return nil
 }
 
-// startChinaIPBackgroundUpdater 代理就绪后经 ECH 隧道后台更新中国 IP 列表
-func startChinaIPBackgroundUpdater() {
-	// 等待代理启动完成
-	time.Sleep(10 * time.Second)
-
-	interval := 24 * time.Hour
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-
-	for range ticker.C {
-		// 检查代理是否可用
-		if activeConnCnt.Load() == 0 && !isProxyReady() {
-			log.Printf("[更新] 代理尚未就绪，跳过本次更新")
-			continue
-		}
-
-		log.Printf("[更新] 开始后台更新中国IP列表...")
-
-		// 下载 IPv4 列表
-		if err := downloadAndApplyIPList(
-			"https://raw.githubusercontent.com/mayaxcn/china-ip-list/refs/heads/master/chnroute.txt",
-			"/data/chn_ip.txt",
-			loadChinaIPList,
-		); err != nil {
-			log.Printf("[更新] IPv4 列表更新失败: %v", err)
-		}
-
-		// 下载 IPv6 列表
-		if err := downloadAndApplyIPList(
-			"https://raw.githubusercontent.com/mayaxcn/china-ip-list/refs/heads/master/chnroute_v6.txt",
-			"/data/chn_ip_v6.txt",
-			loadChinaIPV6List,
-		); err != nil {
-			log.Printf("[更新] IPv6 列表更新失败: %v", err)
-		}
-	}
-}
-
-// downloadAndApplyIPList 下载、校验、原子替换 IP 列表
-func downloadAndApplyIPList(url, filePath string, loadFn func() error) error {
-	// 下载到临时文件
-	tmpFile := filePath + ".tmp"
-	if err := downloadIPList(url, tmpFile); err != nil {
-		return err
-	}
-
-	// 尝试加载新文件进行校验
-	if err := loadFn(); err != nil {
-		os.Remove(tmpFile)
-		return fmt.Errorf("校验失败: %w", err)
-	}
-
-	// 校验通过，替换原文件
-	if err := os.Rename(tmpFile, filePath); err != nil {
-		return fmt.Errorf("替换文件失败: %w", err)
-	}
-
-	log.Printf("[更新] 已更新: %s", filePath)
-	return nil
-}
-
-// isProxyReady 检查代理是否已启动（简单检查）
-func isProxyReady() bool {
-	conn, err := net.DialTimeout("tcp", listenAddr, 2*time.Second)
-	if err != nil {
-		return false
-	}
-	conn.Close()
-	return true
-}
-
-// loadChinaIPList 加载中国IPv4列表（优先读内置文件，再读 /data 持久化文件）
-func loadChinaIPList() error {
-	// 查找顺序：/data/更新文件 > /usr/local/bin/内置文件 > ./当前目录
-	searchPaths := []string{
-		"/data/chn_ip.txt",
-		"/usr/local/bin/chn_ip.txt",
-		"chn_ip.txt",
-	}
-
-	var ipListFile string
-	for _, p := range searchPaths {
-		if info, err := os.Stat(p); err == nil && info.Size() > 0 {
-			ipListFile = p
-			break
-		}
-	}
-	if ipListFile == "" {
-		return fmt.Errorf("中国IPv4列表文件不存在（已内置版本不可用）")
-	}
-
-	file, err := os.Open(ipListFile)
-	if err != nil {
-		return fmt.Errorf("打开IP列表文件失败: %w", err)
-	}
-	defer file.Close()
-
-	var ranges []ipRange
-	scanner := bufio.NewScanner(file)
-	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-
-		parts := strings.Fields(line)
-		if len(parts) == 0 {
-			continue
-		}
-
-		// 支持 CIDR 格式: 1.0.1.0/24
-		if len(parts) == 1 && strings.Contains(parts[0], "/") {
-			_, cidr, err := net.ParseCIDR(parts[0])
-			if err != nil {
-				continue
-			}
-			start := ipToUint32(cidr.IP)
-			end := ipToUint32(lastIP(cidr))
-			if start > 0 && end > 0 && start <= end {
-				ranges = append(ranges, ipRange{start: start, end: end})
-			}
-			continue
-		}
-
-		// 支持 "startIP endIP" 格式
-		if len(parts) < 2 {
-			continue
-		}
-
-		startIP := net.ParseIP(parts[0])
-		endIP := net.ParseIP(parts[1])
-		if startIP == nil || endIP == nil {
-			continue
-		}
-
-		start := ipToUint32(startIP)
-		end := ipToUint32(endIP)
-		if start > 0 && end > 0 && start <= end {
-			ranges = append(ranges, ipRange{start: start, end: end})
-		}
-	}
-
-	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("读取IP列表文件失败: %w", err)
-	}
-
-	if len(ranges) == 0 {
-		return errors.New("IP列表为空")
-	}
-
-	// 按起始IP排序
-	sort.Slice(ranges, func(i, j int) bool {
-		return ranges[i].start < ranges[j].start
-	})
-
-	// 合并重叠/相邻区间，保证二分查找正确
-	ranges = mergeIPv4Ranges(ranges)
-
-	// 安全检查：确保已知国外IP不会被误判为中国IP
-	foreignSamples := []string{"8.8.8.8", "1.1.1.1", "91.108.56.130", "172.67.74.152", "104.16.0.1"}
-	bad := 0
-	for _, s := range foreignSamples {
-		if findIPv4Range(ranges, ipToUint32(net.ParseIP(s))) {
-			bad++
-		}
-	}
-	if bad > 0 {
-		os.Remove(ipListFile) // 删除损坏的列表，下次启动重新下载
-		return fmt.Errorf("IP列表校验失败: 已知国外IP被误判为中国IP (%d/%d)，已丢弃该列表并回退为全局代理", bad, len(foreignSamples))
-	}
-
-	chinaIPRangesMu.Lock()
-	chinaIPRanges = ranges
-	chinaIPRangesMu.Unlock()
-
-	return nil
-}
-
-// lastIP 返回 CIDR 网络的最后一个 IP
-func lastIP(n *net.IPNet) net.IP {
-	ip := n.IP.To4()
-	if ip == nil {
-		return n.IP
-	}
-	last := make(net.IP, 4)
-	for i := 0; i < 4; i++ {
-		last[i] = ip[i] | ^n.Mask[i]
-	}
-	return last
-}
-
-// lastIPv6 返回 IPv6 CIDR 网络的最后一个 IP
-func lastIPv6(n *net.IPNet) net.IP {
-	ip := n.IP.To16()
-	if ip == nil {
-		return nil
-	}
-	last := make(net.IP, 16)
-	for i := 0; i < 16; i++ {
-		last[i] = ip[i] | ^n.Mask[i]
-	}
-	return last
-}
-
-// mergeIPv4Ranges 合并重叠或相邻的区间（输入需已按 start 升序排序）
+// mergeIPv4Ranges 合并重叠/相邻的 IPv4 区间（输入需已按 start 排序）
 func mergeIPv4Ranges(ranges []ipRange) []ipRange {
 	if len(ranges) == 0 {
 		return ranges
@@ -1385,25 +468,148 @@ func findIPv4Range(ranges []ipRange, ip uint32) bool {
 	return false
 }
 
-// loadChinaIPV6List 加载中国IPv6列表（优先读内置文件，再读 /data 持久化文件）
-func loadChinaIPV6List() error {
-	// 查找顺序：/data/更新文件 > /usr/local/bin/内置文件 > ./当前目录
-	searchPaths := []string{
-		"/data/chn_ip_v6.txt",
-		"/usr/local/bin/chn_ip_v6.txt",
-		"chn_ip_v6.txt",
+// findIPListFile 按优先级查找列表文件：程序目录 > /data > /usr/local/bin > 当前目录
+func findIPListFile(name string) (string, error) {
+	var candidates []string
+	if exePath, err := os.Executable(); err == nil {
+		candidates = append(candidates, filepath.Join(filepath.Dir(exePath), name))
 	}
-
-	var ipListFile string
-	for _, p := range searchPaths {
+	candidates = append(candidates,
+		filepath.Join("/data", name),
+		filepath.Join("/usr/local/bin", name),
+		name,
+	)
+	for _, p := range candidates {
 		if info, err := os.Stat(p); err == nil && info.Size() > 0 {
-			ipListFile = p
-			break
+			return p, nil
 		}
 	}
-	if ipListFile == "" {
-		log.Printf("[加载] IPv6 列表文件不存在，将跳过 IPv6 支持")
-		return nil // IPv6 列表不存在不算致命错误
+	return "", fmt.Errorf("%s 未找到", name)
+}
+
+// loadChinaIPList 加载中国IP列表（支持 CIDR 与 "起始IP 结束IP" 两种格式），
+// 文件缺失时保留原版行为：自动下载。
+func loadChinaIPList() error {
+	ipListFile, err := findIPListFile("chn_ip.txt")
+	if err != nil {
+		log.Printf("[加载] IPv4 列表文件不存在，将自动下载")
+		dl := "chn_ip.txt"
+		if exePath, e := os.Executable(); e == nil {
+			dl = filepath.Join(filepath.Dir(exePath), "chn_ip.txt")
+			if _, e := os.Stat(filepath.Dir(dl)); e != nil {
+				dl = "chn_ip.txt"
+			}
+		}
+		url := "https://raw.githubusercontent.com/mayaxcn/china-ip-list/refs/heads/master/chn_ip.txt"
+		if err := downloadIPList(url, dl); err != nil {
+			return fmt.Errorf("自动下载 IPv4 列表失败: %w", err)
+		}
+		ipListFile = dl
+	}
+
+	file, err := os.Open(ipListFile)
+	if err != nil {
+		return fmt.Errorf("打开IP列表文件失败: %w", err)
+	}
+	defer file.Close()
+
+	var ranges []ipRange
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 0, 1024*1024), 1024*1024)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+
+		// CIDR 格式: 1.0.1.0/24
+		if strings.Contains(line, "/") {
+			_, ipnet, err := net.ParseCIDR(line)
+			if err != nil {
+				continue
+			}
+			startIP := ipnet.IP.To4()
+			if startIP == nil {
+				continue
+			}
+			start := ipToUint32(startIP)
+			end := start | ^ipToUint32(net.IP(ipnet.Mask).To4())
+			if start > 0 && start <= end {
+				ranges = append(ranges, ipRange{start: start, end: end})
+			}
+			continue
+		}
+
+		// 起始IP 结束IP 格式
+		parts := strings.Fields(line)
+		if len(parts) < 2 {
+			continue
+		}
+
+		startIP := net.ParseIP(parts[0])
+		endIP := net.ParseIP(parts[1])
+		if startIP == nil || endIP == nil {
+			continue
+		}
+
+		start := ipToUint32(startIP)
+		end := ipToUint32(endIP)
+		if start > 0 && end > 0 && start <= end {
+			ranges = append(ranges, ipRange{start: start, end: end})
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("读取IP列表文件失败: %w", err)
+	}
+
+	if len(ranges) == 0 {
+		return errors.New("IP列表为空")
+	}
+
+	// 排序并合并重叠/相邻区间（保证二分查找正确）
+	sort.Slice(ranges, func(i, j int) bool { return ranges[i].start < ranges[j].start })
+	ranges = mergeIPv4Ranges(ranges)
+
+	// 安全校验：已知国外 IP 不得被误判为中国 IP，坏列表直接丢弃（下次启动重新下载）
+	foreignSamples := []string{"8.8.8.8", "1.1.1.1", "93.184.216.34", "172.217.16.14", "203.0.113.1"}
+	bad := 0
+	for _, s := range foreignSamples {
+		if ip := net.ParseIP(s); ip != nil && findIPv4Range(ranges, ipToUint32(ip)) {
+			bad++
+		}
+	}
+	if bad > 0 {
+		os.Remove(ipListFile)
+		return fmt.Errorf("IP列表校验失败（%d 个国外IP被误判为中国IP），已删除该文件: %s", bad, ipListFile)
+	}
+
+	chinaIPRangesMu.Lock()
+	chinaIPRanges = ranges
+	chinaIPRangesMu.Unlock()
+
+	return nil
+}
+
+// loadChinaIPV6List 加载中国IPv6列表（支持 CIDR 与 "起始IP 结束IP" 两种格式），
+// 文件缺失时保留原版行为：自动下载，失败不致命。
+func loadChinaIPV6List() error {
+	ipListFile, err := findIPListFile("chn_ip_v6.txt")
+	if err != nil {
+		log.Printf("[加载] IPv6 列表文件不存在，将自动下载")
+		dl := "chn_ip_v6.txt"
+		if exePath, e := os.Executable(); e == nil {
+			cand := filepath.Join(filepath.Dir(exePath), "chn_ip_v6.txt")
+			if _, e := os.Stat(filepath.Dir(cand)); e == nil {
+				dl = cand
+			}
+		}
+		url := "https://raw.githubusercontent.com/mayaxcn/china-ip-list/refs/heads/master/chn_ip_v6.txt"
+		if err := downloadIPList(url, dl); err != nil {
+			log.Printf("[警告] 自动下载 IPv6 列表失败: %v，将跳过 IPv6 支持", err)
+			return nil // IPv6 列表下载失败不算致命错误
+		}
+		ipListFile = dl
 	}
 
 	file, err := os.Open(ipListFile)
@@ -1416,35 +622,36 @@ func loadChinaIPV6List() error {
 
 	var ranges []ipRangeV6
 	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 0, 1024*1024), 1024*1024)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
 
-		parts := strings.Fields(line)
-
-		// CIDR 格式: 2001:250::/35
-		if len(parts) == 1 && strings.Contains(parts[0], "/") {
-			_, cidr, err := net.ParseCIDR(parts[0])
-			if err != nil {
+		// CIDR 格式: 2400:3200::/32
+		if strings.Contains(line, "/") {
+			_, ipnet, err := net.ParseCIDR(line)
+			if err != nil || len(ipnet.Mask) != 16 {
 				continue
 			}
-			startBytes := cidr.IP.To16()
-			endBytes := lastIPv6(cidr)
-			if startBytes == nil || endBytes == nil {
+			startIP := ipnet.IP.To16()
+			if startIP == nil {
 				continue
 			}
 			var start, end [16]byte
-			copy(start[:], startBytes)
-			copy(end[:], endBytes)
+			copy(start[:], startIP)
+			for i := 0; i < 16; i++ {
+				end[i] = start[i] | ^ipnet.Mask[i]
+			}
 			if compareIPv6(start, end) <= 0 {
 				ranges = append(ranges, ipRangeV6{start: start, end: end})
 			}
 			continue
 		}
 
-		// "startIP endIP" 格式
+		// 起始IP 结束IP 格式
+		parts := strings.Fields(line)
 		if len(parts) < 2 {
 			continue
 		}
@@ -1455,6 +662,7 @@ func loadChinaIPV6List() error {
 			continue
 		}
 
+		// 转换为16字节数组
 		startBytes := startIP.To16()
 		endBytes := endIP.To16()
 		if startBytes == nil || endBytes == nil {
@@ -1465,6 +673,7 @@ func loadChinaIPV6List() error {
 		copy(start[:], startBytes)
 		copy(end[:], endBytes)
 
+		// 检查范围是否有效
 		if compareIPv6(start, end) <= 0 {
 			ranges = append(ranges, ipRangeV6{start: start, end: end})
 		}
@@ -1491,288 +700,39 @@ func loadChinaIPV6List() error {
 	return nil
 }
 
-// lookupIPWithCache 带缓存的 DNS 查询
-func lookupIPWithCache(host string) ([]net.IP, error) {
-	dnsCacheMu.RLock()
-	entry, ok := dnsCache[host]
-	dnsCacheMu.RUnlock()
-
-	if ok && time.Now().Before(entry.expiresAt) {
-		return entry.ips, nil
-	}
-
-	ips, err := net.LookupIP(host)
-	if err != nil {
-		return nil, err
-	}
-
-	dnsCacheMu.Lock()
-	dnsCache[host] = dnsCacheEntry{
-		ips:       ips,
-		expiresAt: time.Now().Add(5 * time.Minute), // 缓存 5 分钟
-	}
-	// 简单清理：超过 1000 条时清空
-	if len(dnsCache) > 1000 {
-		for k := range dnsCache {
-			delete(dnsCache, k)
-		}
-	}
-	dnsCacheMu.Unlock()
-
-	return ips, nil
-}
-
-// outboundKind 出站类型：直连 / ECH 隧道 / 本地上游（-upstream，如 Clash）
-type outboundKind int
-
-const (
-	outDirect   outboundKind = iota // 本地直连
-	outECH                          // ECH 隧道
-	outUpstream                     // 本地 socks/http 上游
-)
-
-// ruleActionToOutbound 规则动作 → 出站类型（proxy 缺省按 ECH 处理）
-func ruleActionToOutbound(action string) outboundKind {
-	switch action {
-	case "direct":
-		return outDirect
-	case "upstream":
-		return outUpstream
-	default:
-		return outECH
-	}
-}
-
-// cfIPNets 内置 Cloudflare IP 段快照（来源 https://www.cloudflare.com/ips/ ，页面标注最后更新 2023-09-28）。
-// 用于 cfip 规则类型：目标 IP 命中这些网段即算 Cloudflare IP。
-var cfIPNets = mustParseCIDRs([]string{
-	// IPv4
-	"103.21.244.0/22", "103.22.200.0/22", "103.31.4.0/22", "104.16.0.0/13",
-	"104.24.0.0/14", "108.162.192.0/18", "131.0.72.0/22", "141.101.64.0/18",
-	"162.158.0.0/15", "172.64.0.0/13", "173.245.48.0/20", "188.114.96.0/20",
-	"190.93.240.0/20", "197.234.240.0/22", "198.41.128.0/17",
-	// IPv6
-	"2400:cb00::/32", "2606:4700::/32", "2803:f800::/32", "2405:b500::/32",
-	"2405:8100::/32", "2a06:98c0::/29", "2c0f:f248::/32",
-})
-
-// mustParseCIDRs 解析内置网段（字面量写错时 panic，等价于编译期暴露问题）
-func mustParseCIDRs(cidrs []string) []*net.IPNet {
-	nets := make([]*net.IPNet, 0, len(cidrs))
-	for _, c := range cidrs {
-		_, n, err := net.ParseCIDR(c)
-		if err != nil {
-			panic("内置 CF 网段解析失败: " + c)
-		}
-		nets = append(nets, n)
-	}
-	return nets
-}
-
-// cfEffectiveNets 生效 CF 网段 = 内置快照 ∪ 用户新增 − 用户删除
-var (
-	cfEffectiveNets []*net.IPNet
-	cfEffectiveMu   sync.RWMutex
-)
-
-// rebuildCFNets 重建生效 CF 网段（启动加载配置后与 /api/cfips 变更时调用）
-func rebuildCFNets() {
-	del := make(map[string]bool, len(cfipDel))
-	for _, c := range cfipDel {
-		if _, n, err := net.ParseCIDR(strings.TrimSpace(c)); err == nil {
-			del[n.String()] = true
-		}
-	}
-	seen := make(map[string]bool)
-	var out []*net.IPNet
-	for _, n := range cfIPNets {
-		if !del[n.String()] {
-			out = append(out, n)
-			seen[n.String()] = true
-		}
-	}
-	for _, c := range cfipAdd {
-		if _, n, err := net.ParseCIDR(strings.TrimSpace(c)); err == nil && !seen[n.String()] {
-			out = append(out, n)
-			seen[n.String()] = true
-		}
-	}
-	cfEffectiveMu.Lock()
-	cfEffectiveNets = out
-	cfEffectiveMu.Unlock()
-}
-
-// cfStrs 网段列表转字符串（面板展示用）
-func cfStrs(nets []*net.IPNet) []string {
-	out := make([]string, 0, len(nets))
-	for _, n := range nets {
-		out = append(out, n.String())
-	}
-	return out
-}
-
-// isCloudflareIP 判断 IP 是否落在生效 CF 段内
-func isCloudflareIP(ip net.IP) bool {
-	cfEffectiveMu.RLock()
-	nets := cfEffectiveNets
-	cfEffectiveMu.RUnlock()
-	if nets == nil {
-		nets = cfIPNets
-	}
-	for _, n := range nets {
-		if n.Contains(ip) {
-			return true
-		}
-	}
-	return false
-}
-
-// routeDecision 根据自定义规则与分流模式决定出站方式，
-// 同时返回命中依据（R1：让面板能看见"这条连接为什么走这条路"）。
-func routeDecision(targetHost string) (out outboundKind, matched string) {
-	// 1. 自定义规则优先级最高（任何分流模式下都生效）
-	if hit, rule, out2 := matchCustomRule(targetHost); hit {
-		switch out2 {
-		case outDirect:
-			return outDirect, fmt.Sprintf("规则 %s:%s → 直连", rule.Type, rule.Value)
-		case outUpstream:
-			return outUpstream, fmt.Sprintf("规则 %s:%s → 本地上游", rule.Type, rule.Value)
-		default:
-			return outECH, fmt.Sprintf("规则 %s:%s → ECH", rule.Type, rule.Value)
-		}
-	}
-
-	// 2. 按分流模式决定（未命中规则时的默认出站）
-	switch routingMode {
-	case "none":
+// shouldBypassProxy 根据分流模式判断是否应该绕过代理（直连）
+func shouldBypassProxy(targetHost string) bool {
+	if routingMode == "none" {
 		// "不改变代理"模式：所有流量都直连
-		return outDirect, "模式 none → 直连"
-	case "global":
-		// "全局代理"模式：所有流量都走 ECH
-		return outECH, "模式 global → ECH"
-	case "custom":
-		// 自定义规则模式：无匹配规则时默认走 ECH
-		return outECH, "模式 custom(未命中) → ECH"
-	case "bypass_cn":
+		return true
+	}
+	if routingMode == "global" {
+		// "全局代理"模式：所有流量都走代理
+		return false
+	}
+	if routingMode == "bypass_cn" {
 		// "跳过中国大陆"模式：检查是否是中国IP
-		if net.ParseIP(targetHost) != nil {
-			if isChinaIP(targetHost) {
-				return outDirect, "模式 bypass_cn(中国IP) → 直连"
-			}
-			return outECH, "模式 bypass_cn(海外IP) → ECH"
+		// 先尝试解析为IP
+		if ip := net.ParseIP(targetHost); ip != nil {
+			return isChinaIP(targetHost)
 		}
-		// 如果是域名，先解析IP（带缓存）
-		ips, err := lookupIPWithCache(targetHost)
+		// 如果是域名，先解析IP
+		ips, err := net.LookupIP(targetHost)
 		if err != nil {
-			// 解析失败，默认走 ECH
-			return outECH, "模式 bypass_cn(解析失败) → ECH"
+			// 解析失败，默认走代理
+			return false
 		}
 		// 检查所有解析到的IP，如果有一个是中国IP，就直连
 		for _, ip := range ips {
 			if isChinaIP(ip.String()) {
-				return outDirect, "模式 bypass_cn(中国IP) → 直连"
+				return true
 			}
 		}
-		// 都不是中国IP，走 ECH
-		return outECH, "模式 bypass_cn(海外IP) → ECH"
+		// 都不是中国IP，走代理
+		return false
 	}
-	// 未知模式，默认走 ECH
-	return outECH, "未知模式 → ECH"
-}
-
-// matchCustomRule 匹配自定义规则，返回 (是否命中, 命中的规则, 出站类型)
-func matchCustomRule(targetHost string) (bool, customRule, outboundKind) {
-	customRulesMu.RLock()
-	defer customRulesMu.RUnlock()
-
-	if len(customRules) == 0 {
-		return false, customRule{}, outECH
-	}
-
-	host, _, err := net.SplitHostPort(targetHost)
-	if err != nil {
-		host = targetHost
-	}
-	host = strings.ToLower(strings.TrimSuffix(host, "."))
-
-	// 检查是否是IP地址
-	isIP := net.ParseIP(host) != nil
-
-	// R3: ipcidr/cfip 规则对域名目标同样生效——按规则顺序遍历，遇到第一条需要 IP 的规则时才解析一次
-	var resolvedIPs []net.IP
-	resolved := false
-	resolveOnce := func() {
-		if resolved {
-			return
-		}
-		resolved = true
-		if ips, err := lookupIPWithCache(host); err == nil {
-			resolvedIPs = ips
-		}
-	}
-
-	for _, rule := range customRules {
-		switch rule.Type {
-		case "domain":
-			if !isIP {
-				value := strings.ToLower(strings.TrimSpace(rule.Value))
-				matched := false
-				// 支持通配符 *.domain
-				if strings.HasPrefix(value, "*.") {
-					suffix := strings.TrimPrefix(value, "*.")
-					if host == suffix || strings.HasSuffix(host, "."+suffix) {
-						matched = true
-					}
-				} else {
-					// 精确匹配或子域名匹配
-					if host == value || strings.HasSuffix(host, "."+value) {
-						matched = true
-					}
-				}
-				if matched {
-					return true, rule, ruleActionToOutbound(rule.Action)
-				}
-			}
-		case "ipcidr":
-			_, cidr, err := net.ParseCIDR(rule.Value)
-			if err != nil {
-				continue
-			}
-			if isIP {
-				if ip := net.ParseIP(host); ip != nil && cidr.Contains(ip) {
-					return true, rule, ruleActionToOutbound(rule.Action)
-				}
-				continue
-			}
-			// 域名目标：解析后回查（解析结果由 lookupIPWithCache 缓存 5 分钟）
-			resolveOnce()
-			for _, ip := range resolvedIPs {
-				if cidr.Contains(ip) {
-					return true, rule, ruleActionToOutbound(rule.Action)
-				}
-			}
-		case "cfip":
-			// 内置 Cloudflare IP 段匹配：IP 字面量直接查，域名先解析再查
-			if isIP {
-				if ip := net.ParseIP(host); ip != nil && isCloudflareIP(ip) {
-					return true, rule, ruleActionToOutbound(rule.Action)
-				}
-				continue
-			}
-			resolveOnce()
-			for _, ip := range resolvedIPs {
-				if isCloudflareIP(ip) {
-					return true, rule, ruleActionToOutbound(rule.Action)
-				}
-			}
-		case "keyword":
-			if rule.Value != "" && strings.Contains(host, strings.ToLower(rule.Value)) {
-				return true, rule, ruleActionToOutbound(rule.Action)
-			}
-		}
-	}
-	// 没有匹配规则
-	return false, customRule{}, outECH
+	// 未知模式，默认走代理
+	return false
 }
 
 func isNormalCloseError(err error) bool {
@@ -1789,1082 +749,11 @@ func isNormalCloseError(err error) bool {
 		strings.Contains(errStr, "normal closure")
 }
 
-// ======================== 自定义规则 ========================
-
-// parseRulesFile 解析规则文件（CSV：type,value,action），返回解析出的规则
-func parseRulesFile(filePath string) ([]customRule, error) {
-	file, err := os.Open(filePath)
-	if err != nil {
-		return nil, fmt.Errorf("打开规则文件失败: %w", err)
-	}
-	defer file.Close()
-
-	var rules []customRule
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "//") {
-			continue
-		}
-
-		parts := strings.SplitN(line, ",", 3)
-		if len(parts) != 3 {
-			continue
-		}
-
-		ruleType := strings.TrimSpace(parts[0])
-		value := strings.TrimSpace(parts[1])
-		action := strings.TrimSpace(parts[2])
-
-		if ruleType != "domain" && ruleType != "ipcidr" && ruleType != "keyword" && ruleType != "cfip" {
-			continue
-		}
-		if action != "proxy" && action != "direct" && action != "upstream" {
-			continue
-		}
-		if value == "" && ruleType != "cfip" { // cfip 的 value 只是备注，可为空
-			continue
-		}
-
-		rules = append(rules, customRule{
-			Type:   ruleType,
-			Value:  value,
-			Action: action,
-		})
-	}
-
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("读取规则文件失败: %w", err)
-	}
-
-	return rules, nil
-}
-
-// rebuildCustomRulesLocked 重建生效规则列表（调用方需已持有 customRulesMu 写锁）
-func rebuildCustomRulesLocked() {
-	merged := make([]customRule, 0, len(fileRules)+len(panelRules))
-	merged = append(merged, fileRules...)
-	merged = append(merged, panelRules...)
-	customRules = merged
-}
-
-// loadCustomRules 从 -rules 指定的 CSV 文件加载规则（只读桶，面板保存不会覆盖它）
-func loadCustomRules(filePath string) error {
-	rules, err := parseRulesFile(filePath)
-	if err != nil {
-		return err
-	}
-
-	customRulesMu.Lock()
-	fileRules = rules
-	rebuildCustomRulesLocked()
-	total := len(customRules)
-	customRulesMu.Unlock()
-
-	log.Printf("[规则] 已加载文件规则 %d 条 (%s)，生效规则合计 %d 条", len(rules), filePath, total)
-	return nil
-}
-
-// saveCustomRules 保存面板规则到文件（只写面板桶，避免把 -rules CSV 规则抄进 rules.json）
-func saveCustomRules(filePath string) error {
-	customRulesMu.RLock()
-	rules := make([]customRule, len(panelRules))
-	copy(rules, panelRules)
-	customRulesMu.RUnlock()
-
-	// 确保目录存在
-	if dir := filepath.Dir(filePath); dir != "" && dir != "." {
-		if err := os.MkdirAll(dir, 0755); err != nil {
-			return fmt.Errorf("创建规则目录失败: %w", err)
-		}
-	}
-
-	file, err := os.Create(filePath)
-	if err != nil {
-		return fmt.Errorf("创建规则文件失败: %w", err)
-	}
-	defer file.Close()
-
-	for _, rule := range rules {
-		fmt.Fprintf(file, "%s,%s,%s\n", rule.Type, rule.Value, rule.Action)
-	}
-
-	return nil
-}
-
-// loadRulesDataFile 从面板规则持久化文件加载规则（可编辑桶，与 -rules CSV 分开存放）
-func loadRulesDataFile() {
-	if rulesData == "" {
-		return
-	}
-	if _, err := os.Stat(rulesData); os.IsNotExist(err) {
-		return
-	}
-	rules, err := parseRulesFile(rulesData)
-	if err != nil {
-		log.Printf("[规则] 加载面板规则失败: %v", err)
-		return
-	}
-
-	customRulesMu.Lock()
-	panelRules = rules
-	rebuildCustomRulesLocked()
-	fileCnt, panelCnt, total := len(fileRules), len(panelRules), len(customRules)
-	customRulesMu.Unlock()
-
-	log.Printf("[规则] 已加载面板规则 %d 条（文件规则 %d 条，生效合计 %d 条）", panelCnt, fileCnt, total)
-}
-
-// ======================== 连接追踪与流量统计 ========================
-
-// addConn 添加连接追踪
-func addConn(source, target, mode, rule, matched string) string {
-	id := fmt.Sprintf("%d", connIDCounter.Add(1))
-	info := &connInfo{
-		ID:        id,
-		Source:    source,
-		Target:    target,
-		Mode:      mode,
-		Rule:      rule,
-		Matched:   matched,
-		StartTime: time.Now(),
-	}
-	activeConns.Store(id, info)
-	activeConnCnt.Add(1)
-	totalConns.Add(1)
-	return id
-}
-
-// removeConn 移除连接追踪，将流量计入总统计
-func removeConn(id string) {
-	if v, ok := activeConns.LoadAndDelete(id); ok {
-		activeConnCnt.Add(-1)
-		info := v.(*connInfo)
-		up := info.upload.Load()
-		dn := info.download.Load()
-		totalUpload.Add(up)
-		totalDownload.Add(dn)
-	}
-}
-
-// getActiveConns 获取所有活跃连接
-func getActiveConns() []connInfoResp {
-	var conns []connInfoResp
-	activeConns.Range(func(key, value interface{}) bool {
-		info := value.(*connInfo)
-		conns = append(conns, connInfoResp{
-			ID:        info.ID,
-			Source:    info.Source,
-			Target:    info.Target,
-			Mode:      info.Mode,
-			Rule:      info.Rule,
-			Matched:   info.Matched,
-			Upload:    info.upload.Load(),
-			Download:  info.download.Load(),
-			StartTime: info.StartTime,
-		})
-		return true
-	})
-	return conns
-}
-
-// addLog 添加日志到缓冲
-func addLog(level, msg string) {
-	entry := logEntry{
-		Time:  time.Now().Format("2006-01-02 15:04:05"),
-		Level: level,
-		Msg:   msg,
-	}
-	logBufferMu.Lock()
-	logBuffer = append(logBuffer, entry)
-	if len(logBuffer) > 200 {
-		logBuffer = logBuffer[len(logBuffer)-200:]
-	}
-	logBufferMu.Unlock()
-}
-
-// ======================== Web 管理面板 ========================
-
-var upgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool { return true },
-}
-
-// startWebServer 启动 Web 管理面板
-func startWebServer(addr string) {
-	mux := http.NewServeMux()
-
-	// 登录/登出（不需鉴权）
-	mux.HandleFunc("/login", handleLogin)
-	mux.HandleFunc("/api/login", handleAPILogin)
-	mux.HandleFunc("/api/logout", handleAPILogout)
-
-	// 需要鉴权的路由
-	mux.Handle("/", authMiddleware(http.HandlerFunc(handleIndex)))
-	mux.Handle("/api/status", authMiddleware(http.HandlerFunc(handleStatus)))
-	mux.Handle("/api/config", authMiddleware(http.HandlerFunc(handleConfig)))
-	mux.Handle("/api/rules", authMiddleware(http.HandlerFunc(handleRules)))
-	mux.Handle("/api/connections", authMiddleware(http.HandlerFunc(handleConnections)))
-	mux.Handle("/api/traffic", authMiddleware(http.HandlerFunc(handleTraffic)))
-	mux.Handle("/api/logs", authMiddleware(http.HandlerFunc(handleLogs)))
-	mux.Handle("/api/service/", authMiddleware(http.HandlerFunc(handleService)))
-		mux.Handle("/api/exit-info", authMiddleware(http.HandlerFunc(handleExitInfo)))
-		mux.Handle("/api/cfips", authMiddleware(http.HandlerFunc(handleCFIPs)))
-	mux.Handle("/ws", authMiddleware(http.HandlerFunc(handleWebSocket)))
-
-	log.Printf("[Web] 管理面板启动: http://%s", addr)
-	if err := http.ListenAndServe(addr, mux); err != nil {
-		log.Printf("[Web] 管理面板启动失败: %v", err)
-	}
-}
-
-// authMiddleware 鉴权中间件（webPassword 为空时跳过鉴权）
-func authMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if webPassword == "" {
-			next.ServeHTTP(w, r)
-			return
-		}
-
-		// 检查 cookie 中的 session
-		if cookie, err := r.Cookie("ech_session"); err == nil {
-			webSessionsMu.Lock()
-			if exp, ok := webSessions[cookie.Value]; ok && time.Now().Before(exp) {
-				webSessionsMu.Unlock()
-				next.ServeHTTP(w, r)
-				return
-			}
-			delete(webSessions, cookie.Value)
-			webSessionsMu.Unlock()
-		}
-
-		// 未登录，重定向到登录页
-		http.Redirect(w, r, "/login", http.StatusFound)
-	})
-}
-
-// handleLogin 提供登录页面
-func handleLogin(w http.ResponseWriter, r *http.Request) {
-	if webPassword == "" {
-		http.Redirect(w, r, "/", http.StatusFound)
-		return
-	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Write([]byte(loginHTML))
-}
-
-// loginHTML 登录页面
-var loginHTML = `<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>ECH Proxy - 登录</title>
-<style>
-*{margin:0;padding:0;box-sizing:border-box}
-body{background:#0f1117;color:#e1e4e8;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh}
-.login-box{background:#161b22;border:1px solid #30363d;border-radius:12px;padding:32px;width:360px;box-shadow:0 8px 24px rgba(0,0,0,.4)}
-.login-box h2{text-align:center;margin-bottom:24px;color:#58a6ff;font-size:1.3em}
-.login-box input{width:100%;padding:10px 14px;background:#0d1117;border:1px solid #30363d;border-radius:8px;color:#e1e4e8;font-size:14px;margin-bottom:16px;outline:none}
-.login-box input:focus{border-color:#58a6ff}
-.login-box button{width:100%;padding:10px;background:#238636;color:#fff;border:none;border-radius:8px;font-size:14px;cursor:pointer;font-weight:600}
-.login-box button:hover{background:#2ea043}
-.error{color:#f85149;text-align:center;margin-bottom:12px;font-size:13px;display:none}
-</style>
-</head>
-<body>
-<div class="login-box">
-<h2>ECH Proxy 管理面板</h2>
-<div class="error" id="err"></div>
-<input type="password" id="pw" placeholder="请输入管理密码" autofocus>
-<button onclick="doLogin()">登 录</button>
-</div>
-<script>
-document.getElementById('pw').addEventListener('keydown',e=>{if(e.key==='Enter')doLogin()});
-async function doLogin(){
-const pw=document.getElementById('pw').value;
-const err=document.getElementById('err');
-try{
-const r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:pw})});
-const d=await r.json();
-if(d.status==='ok'){location.href='/'}else{err.textContent=d.error||'密码错误';err.style.display='block'}
-}catch(e){err.textContent='网络错误';err.style.display='block'}
-}
-</script>
-</body>
-</html>`
-
-// handleAPILogin 处理登录请求
-func handleAPILogin(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	if r.Method != "POST" {
-		http.Error(w, `{"error":"method not allowed"}`, 405)
-		return
-	}
-	var req struct {
-		Password string `json:"password"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		json.NewEncoder(w).Encode(map[string]string{"error": "请求格式错误"})
-		return
-	}
-	if req.Password != webPassword {
-		json.NewEncoder(w).Encode(map[string]string{"error": "密码错误"})
-		return
-	}
-	// 生成 session
-	sessionID := fmt.Sprintf("%d", time.Now().UnixNano())
-	webSessionsMu.Lock()
-	webSessions[sessionID] = time.Now().Add(7 * 24 * time.Hour)
-	webSessionsMu.Unlock()
-
-	http.SetCookie(w, &http.Cookie{
-		Name:     "ech_session",
-		Value:    sessionID,
-		Path:     "/",
-		HttpOnly: true,
-		MaxAge:   7 * 24 * 3600,
-	})
-	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
-}
-
-// handleAPILogout 退出登录
-func handleAPILogout(w http.ResponseWriter, r *http.Request) {
-	if cookie, err := r.Cookie("ech_session"); err == nil {
-		webSessionsMu.Lock()
-		delete(webSessions, cookie.Value)
-		webSessionsMu.Unlock()
-	}
-	http.SetCookie(w, &http.Cookie{
-		Name:   "ech_session",
-		Value:  "",
-		Path:   "/",
-		MaxAge: -1,
-	})
-	http.Redirect(w, r, "/login", http.StatusFound)
-}
-
-// handleIndex 提供 index.html
-func handleIndex(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/" {
-		http.NotFound(w, r)
-		return
-	}
-	data, err := indexHTML.ReadFile("index.html")
-	if err != nil {
-		http.Error(w, "Internal Server Error", 500)
-		return
-	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Write(data)
-}
-
-// handleStatus 获取系统状态
-func handleStatus(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	var m runtime.MemStats
-	runtime.ReadMemStats(&m)
-	customRulesMu.RLock()
-	customRulesCount := len(customRules)
-	customRulesMu.RUnlock()
-	json.NewEncoder(w).Encode(statusResponse{
-		Version:       appVersion,
-		Uptime:        time.Since(startTime).Truncate(time.Second).String(),
-		TotalConns:    totalConns.Load(),
-		ActiveConns:   int(activeConnCnt.Load()),
-		TotalUpload:   totalUpload.Load(),
-		TotalDownload: totalDownload.Load(),
-		RoutingMode:   routingMode,
-		ListenAddr:    listenAddr,
-		ServerAddr:    serverAddr,
-		ECHDomain:     echDomain,
-		WebAddr:       webAddr,
-		CustomRules:   customRulesCount,
-		MemoryMB:      float64(m.Alloc) / 1024 / 1024,
-	})
-}
-
-// handleConfig 获取/更新配置
-func handleConfig(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-
-	if r.Method == "GET" {
-		config := map[string]interface{}{
-			"listen_addr":  listenAddr,
-			"server_addr":  serverAddr,
-			"server_ip":    serverIP,
-			"token":        token,
-			"dns_server":   dnsServer,
-			"ech_domain":   echDomain,
-			"routing_mode": routingMode,
-			"web_addr":     webAddr,
-			"rules_file":   rulesFile,
-			"proxy_ip":     proxyIP,
-			"web_password": webPassword,
-			"upstream":     upstreamRaw,
-			"fallback":     fallbackSwitchRaw,
-			"recycle_bytes":    recycleBytesRaw,
-			"recycle_duration": recycleDurationRaw,
-		}
-		json.NewEncoder(w).Encode(config)
-		return
-	}
-
-	// POST: 更新配置
-	var update map[string]string
-	if err := json.NewDecoder(r.Body).Decode(&update); err != nil {
-		http.Error(w, `{"error":"invalid json"}`, 400)
-		return
-	}
-
-	// 校验地址类字段：非法值直接拒绝，避免写坏配置导致面板/代理无法启动
-	if v, ok := update["listen_addr"]; ok && v != "" && !validHostPort(v) {
-		json.NewEncoder(w).Encode(map[string]string{"error": "listen_addr 非法，需要 host:port 格式，例如 0.0.0.0:30000"})
-		return
-	}
-	if v, ok := update["server_addr"]; ok && v != "" && !validHostPort(v) {
-		json.NewEncoder(w).Encode(map[string]string{"error": "server_addr 非法，需要 host:port 格式，例如 xxx.workers.dev:443"})
-		return
-	}
-	// 面板地址宽容：纯端口输入（如 30001）先归一化成 :30001 再校验
-	if v, ok := update["web_addr"]; ok {
-		update["web_addr"] = normalizeWebAddr(v)
-	}
-	if v, ok := update["web_addr"]; ok && v != "" && !validHostPort(v) {
-		json.NewEncoder(w).Encode(map[string]string{"error": "web_addr 非法，可填端口（如 30001）或 host:port（如 0.0.0.0:30001）"})
-		return
-	}
-	if v, ok := update["dns_server"]; ok && v == "" {
-		json.NewEncoder(w).Encode(map[string]string{"error": "dns_server 不能为空"})
-		return
-	}
-	if v, ok := update["ech_domain"]; ok && v == "" {
-		json.NewEncoder(w).Encode(map[string]string{"error": "ech_domain 不能为空"})
-		return
-	}
-
-	if v, ok := update["listen_addr"]; ok && v != "" {
-		listenAddr = v
-	}
-	if v, ok := update["server_addr"]; ok && v != "" {
-		serverAddr = v
-	}
-	if v, ok := update["server_ip"]; ok {
-		serverIP = v
-	}
-	if v, ok := update["token"]; ok && v != "" {
-		token = v
-	}
-	if v, ok := update["dns_server"]; ok && v != "" {
-		dnsServer = v
-	}
-	if v, ok := update["ech_domain"]; ok && v != "" {
-		echDomain = v
-	}
-	if v, ok := update["proxy_ip"]; ok {
-		proxyIP = v
-		log.Printf("[配置] 出口 IP 已更新: %s", proxyIP)
-	}
-	if v, ok := update["web_password"]; ok {
-		webPassword = v
-		log.Printf("[配置] 面板密码已更新")
-	}
-	if v, ok := update["fallback"]; ok && v != "" {
-		fb := strings.ToLower(strings.TrimSpace(v))
-		if fb != "on" && fb != "off" {
-			json.NewEncoder(w).Encode(map[string]string{"error": "fallback 非法，只能是 on/off"})
-			return
-		}
-		fallbackSwitchRaw = fb
-	}
-	if v, ok := update["upstream"]; ok {
-		if strings.TrimSpace(v) != "" {
-			if _, _, _, _, err := parseUpstream(v); err != nil {
-				json.NewEncoder(w).Encode(map[string]string{"error": "upstream 非法: " + err.Error()})
-				return
-			}
-		}
-		upstreamRaw = v
-		parseFallbackOptions()
-		log.Printf("[配置] 上游已更新: %q（兜底 %s）", upstreamRaw, fallbackSwitchRaw)
-	}
-	if v, ok := update["routing_mode"]; ok && v != "" {
-		switch v {
-		case "global", "bypass_cn", "none", "custom":
-			routingMode = v
-			log.Printf("[配置] 分流模式已更新: %s", routingMode)
-		}
-	}
-	if v, ok := update["web_addr"]; ok && v != "" {
-		webAddr = v
-	}
-
-	// 老化阈值：先整体校验再落盘，避免写坏一半
-	recBytes, recDur := recycleBytesRaw, recycleDurationRaw
-	if v, ok := update["recycle_bytes"]; ok {
-		s := strings.TrimSpace(v)
-		if s == "" {
-			s = "0"
-		}
-		if _, err := parseSize(s); err != nil {
-			json.NewEncoder(w).Encode(map[string]string{"error": "老化流量阈值非法，如 150m / 2g，0 = 关闭"})
-			return
-		}
-		recBytes = s
-	}
-	if v, ok := update["recycle_duration"]; ok {
-		s := strings.TrimSpace(v)
-		if s == "" {
-			s = "0"
-		}
-		if s != "0" {
-			if d, err := time.ParseDuration(s); err != nil || d < 0 {
-				json.NewEncoder(w).Encode(map[string]string{"error": "老化时长阈值非法，如 15m / 1h，0 = 关闭"})
-				return
-			}
-		}
-		recDur = s
-	}
-	recycleBytesRaw, recycleDurationRaw = recBytes, recDur
-	parseRecycleOptions()
-	log.Printf("[配置] 老化阈值: 流量 %s / 时长 %s", recycleBytesRaw, recycleDurationRaw)
-
-	// 刷新 ECH
-	if err := refreshECH(); err != nil {
-		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
-		return
-	}
-
-	// 保存配置到文件
-	if err := saveConfig(configFile); err != nil {
-		log.Printf("[配置] 保存配置文件失败: %v", err)
-	} else {
-		log.Printf("[配置] 配置已保存到: %s", configFile)
-	}
-
-	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
-}
-
-// handleRules 获取/更新自定义规则
-func handleRules(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-
-	if r.Method == "GET" {
-		// 只返回面板桶：-rules CSV 属于只读配置，面板改不到它（R2 规则源分离）
-		customRulesMu.RLock()
-		rules := make([]customRule, len(panelRules))
-		copy(rules, panelRules)
-		customRulesMu.RUnlock()
-		json.NewEncoder(w).Encode(rules)
-		return
-	}
-
-	// POST: 替换面板规则
-	var rules []customRule
-	if err := json.NewDecoder(r.Body).Decode(&rules); err != nil {
-		http.Error(w, `{"error":"invalid json"}`, 400)
-		return
-	}
-	// 逐条校验，拒绝脏数据（否则坏规则会静默落盘且永远匹配不上）
-	for i, rule := range rules {
-		rule.Value = strings.TrimSpace(rule.Value)
-		switch rule.Type {
-		case "domain", "keyword":
-			if rule.Value == "" {
-				http.Error(w, fmt.Sprintf(`{"error":"第 %d 条规则值为空"}`, i+1), 400)
-				return
-			}
-		case "ipcidr":
-			if _, _, err := net.ParseCIDR(rule.Value); err != nil {
-				http.Error(w, fmt.Sprintf(`{"error":"第 %d 条 ipcidr 格式无效: %s"}`, i+1, rule.Value), 400)
-				return
-			}
-		case "cfip":
-			// value 只是备注（匹配只看内置 CF 段），允许任意文本
-		default:
-			http.Error(w, fmt.Sprintf(`{"error":"第 %d 条类型无效: %s"}`, i+1, rule.Type), 400)
-			return
-		}
-		if rule.Action != "proxy" && rule.Action != "direct" && rule.Action != "upstream" {
-			http.Error(w, fmt.Sprintf(`{"error":"第 %d 条动作无效: %s"}`, i+1, rule.Action), 400)
-			return
-		}
-		rules[i].Value = rule.Value
-	}
-
-	customRulesMu.Lock()
-	panelRules = rules
-	rebuildCustomRulesLocked()
-	total := len(customRules)
-	customRulesMu.Unlock()
-
-	// 持久化到文件
-	if err := saveCustomRules(rulesData); err != nil {
-		log.Printf("[规则] 保存规则失败: %v", err)
-	} else {
-		log.Printf("[规则] 已保存 %d 条面板规则到 %s（生效合计 %d 条）", len(rules), rulesData, total)
-	}
-
-	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
-}
-
-// handleCFIPs 管理生效 CF 网段：GET 返回内置快照/增减量/生效集；POST 更新增减量并持久化
-func handleCFIPs(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	if r.Method == "GET" {
-		cfEffectiveMu.RLock()
-		eff := cfStrs(cfEffectiveNets)
-		if eff == nil {
-			eff = cfStrs(cfIPNets)
-		}
-		cfEffectiveMu.RUnlock()
-		add := append([]string{}, cfipAdd...)
-		del := append([]string{}, cfipDel...)
-		if add == nil {
-			add = []string{}
-		}
-		if del == nil {
-			del = []string{}
-		}
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"builtin":   cfStrs(cfIPNets),
-			"add":       add,
-			"del":       del,
-			"effective": eff,
-		})
-		return
-	}
-	if r.Method != "POST" {
-		http.Error(w, `{"error":"method not allowed"}`, 405)
-		return
-	}
-	var body struct {
-		Add []string `json:"add"`
-		Del []string `json:"del"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		http.Error(w, `{"error":"invalid json"}`, 400)
-		return
-	}
-	norm := func(list []string) ([]string, error) {
-		seen := map[string]bool{}
-		out := []string{}
-		for _, c := range list {
-			_, n, err := net.ParseCIDR(strings.TrimSpace(c))
-			if err != nil {
-				return nil, fmt.Errorf("网段格式无效: %s", c)
-			}
-			if !seen[n.String()] {
-				seen[n.String()] = true
-				out = append(out, n.String())
-			}
-		}
-		return out, nil
-	}
-	add, err := norm(body.Add)
-	if err != nil {
-		http.Error(w, `{"error":"`+err.Error()+`"}`, 400)
-		return
-	}
-	del, err := norm(body.Del)
-	if err != nil {
-		http.Error(w, `{"error":"`+err.Error()+`"}`, 400)
-		return
-	}
-	builtin := map[string]bool{}
-	for _, n := range cfIPNets {
-		builtin[n.String()] = true
-	}
-	for _, c := range del {
-		if !builtin[c] {
-			http.Error(w, `{"error":"只能删除内置快照中的网段: `+c+`"}`, 400)
-			return
-		}
-	}
-	cfipAdd, cfipDel = add, del
-	rebuildCFNets()
-	if err := saveConfig(configFile); err != nil {
-		log.Printf("[规则] 保存 CF 增减量失败: %v", err)
-	}
-	cfEffectiveMu.RLock()
-	eff := cfStrs(cfEffectiveNets)
-	cfEffectiveMu.RUnlock()
-	json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok", "effective": eff})
-}
-
-// handleConnections 获取活跃连接（支持搜索和排序）
-func handleConnections(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-
-	conns := getActiveConns()
-
-	// 搜索过滤
-	search := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("search")))
-	if search != "" {
-		var filtered []connInfoResp
-		for _, c := range conns {
-			if strings.Contains(strings.ToLower(c.ID), search) ||
-				strings.Contains(strings.ToLower(c.Source), search) ||
-				strings.Contains(strings.ToLower(c.Target), search) ||
-				strings.Contains(strings.ToLower(c.Mode), search) ||
-				strings.Contains(strings.ToLower(c.Rule), search) ||
-				strings.Contains(strings.ToLower(c.Matched), search) {
-				filtered = append(filtered, c)
-			}
-		}
-		conns = filtered
-	}
-
-	// 排序
-	sortBy := r.URL.Query().Get("sort")
-	sortOrder := r.URL.Query().Get("order") // "asc" or "desc", default asc
-	if sortBy != "" {
-		desc := sortOrder == "desc"
-		sort.Slice(conns, func(i, j int) bool {
-			var less bool
-			switch sortBy {
-			case "id":
-				less = conns[i].ID < conns[j].ID
-			case "source":
-				less = conns[i].Source < conns[j].Source
-			case "target":
-				less = conns[i].Target < conns[j].Target
-			case "mode":
-				less = conns[i].Mode < conns[j].Mode
-			case "rule":
-				less = conns[i].Rule < conns[j].Rule
-			case "upload":
-				less = conns[i].Upload < conns[j].Upload
-			case "download":
-				less = conns[i].Download < conns[j].Download
-			case "start_time":
-				less = conns[i].StartTime.Before(conns[j].StartTime)
-			default:
-				less = conns[i].StartTime.Before(conns[j].StartTime)
-			}
-			if desc {
-				return !less
-			}
-			return less
-		})
-	}
-
-	json.NewEncoder(w).Encode(conns)
-}
-
-// handleTraffic 获取流量统计
-func handleTraffic(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"total_upload":   totalUpload.Load(),
-		"total_download": totalDownload.Load(),
-		"total_conns":    totalConns.Load(),
-		"uptime":         time.Since(startTime).Seconds(),
-	})
-}
-
-// handleLogs 获取日志
-func handleLogs(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	logBufferMu.Lock()
-	logs := make([]logEntry, len(logBuffer))
-	copy(logs, logBuffer)
-	logBufferMu.Unlock()
-
-	// 返回最新的日志 (倒序)
-	sort.Slice(logs, func(i, j int) bool {
-		return i > j
-	})
-
-	limit := 100
-	if len(logs) < limit {
-		limit = len(logs)
-	}
-	json.NewEncoder(w).Encode(logs[:limit])
-}
-
-// handleService 服务控制
-func handleService(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	action := strings.TrimPrefix(r.URL.Path, "/api/service/")
-
-	switch action {
-	case "refresh-ech":
-		if err := refreshECH(); err != nil {
-			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
-			return
-		}
-		json.NewEncoder(w).Encode(map[string]string{"status": "ok", "message": "ECH 配置已刷新"})
-	case "reload-rules":
-		if rulesFile == "" {
-			json.NewEncoder(w).Encode(map[string]string{"error": "未配置规则文件"})
-			return
-		}
-		if err := loadCustomRules(rulesFile); err != nil {
-			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
-			return
-		}
-		json.NewEncoder(w).Encode(map[string]string{"status": "ok", "message": "规则已重载"})
-	default:
-		json.NewEncoder(w).Encode(map[string]string{"error": "unknown action"})
-	}
-}
-
-// handleWebSocket WebSocket 实时推送
-// ======================== 出口IP检测 ========================
-
-var (
-	cachedExitIP   string
-	cachedCOLO     string
-	exitInfoAt     time.Time
-	exitInfoMu     sync.RWMutex
-	exitInfoOnce   sync.Once
-	exitDetecting  atomic.Bool
-)
-
-// exitInfoTTL 出口信息缓存有效期：只在概览页按需检测，平时不产生探测连接
-const exitInfoTTL = 10 * time.Minute
-
-func startExitInfoDetector() {
-	// 仅启动后探测一次供首屏展示；之后只在查看概览页（/api/exit-info）时按需检测
-	go func() {
-		time.Sleep(5 * time.Second)
-		detectExitInfo()
-	}()
-}
-
-// triggerExitDetect 触发一次后台检测（防并发：检测中直接返回）
-func triggerExitDetect() {
-	if exitDetecting.CompareAndSwap(false, true) {
-		go func() {
-			defer exitDetecting.Store(false)
-			detectExitInfo()
-		}()
-	}
-}
-
-func detectExitInfo() {
-	log.Printf("[检测] === 开始检测出口IP ===")
-
-	// 通过本地 HTTP 代理检测出口 IP（避免 Worker 不支持 80 端口的问题）
-	localProxy := "http://127.0.0.1" + listenAddr[strings.Index(listenAddr, ":"):]
-	proxyURL, _ := url.Parse(localProxy)
-
-	client := &http.Client{
-		Timeout: 10 * time.Second,
-		Transport: &http.Transport{
-			Proxy: http.ProxyURL(proxyURL),
-		},
-	}
-
-	// 检测出口 IP（多源轮询，任一成功即可）
-	exitIP := ""
-	ipSources := []string{
-		"https://api.ipify.org?format=json",
-		"https://ifconfig.me/ip",
-		"https://api.ip.sb/ip",
-	}
-	for _, src := range ipSources {
-		if ip := fetchExitIP(client, src); ip != "" {
-			exitIP = ip
-			break
-		}
-	}
-	if exitIP == "" {
-		log.Printf("[检测] 获取出口IP失败（已试 %d 个源）", len(ipSources))
-	}
-
-	// 检测 COLO（多源 Cloudflare trace，任一成功即可）
-	colo := ""
-	coloSources := []string{
-		"https://1.1.1.1/cdn-cgi/trace",
-		"https://www.cloudflare.com/cdn-cgi/trace",
-		"https://cloudflare.com/cdn-cgi/trace",
-	}
-	for _, src := range coloSources {
-		if c := fetchCOLO(client, src); c != "" {
-			colo = c
-			break
-		}
-	}
-
-	// 只在成功时更新缓存：失败不擦除上次的结果
-	exitInfoMu.Lock()
-	if exitIP != "" {
-		cachedExitIP = exitIP
-	}
-	if colo != "" {
-		cachedCOLO = colo
-	}
-	if exitIP != "" || colo != "" {
-		exitInfoAt = time.Now()
-	}
-	exitInfoMu.Unlock()
-
-	if exitIP != "" {
-		log.Printf("[检测] 出口IP: %s, COLO: %s", exitIP, colo)
-	}
-}
-
-// fetchExitIP 从单个源获取出口 IP（JSON 或纯文本），失败返回 ""
-func fetchExitIP(client *http.Client, url string) string {
-	resp, err := client.Get(url)
-	if err != nil {
-		return ""
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		return ""
-	}
-	body, _ := io.ReadAll(resp.Body)
-	// 先按 JSON 解析（ipify），失败则按纯文本处理，结果必须是合法 IP
-	var ipResp struct{ IP string `json:"ip"` }
-	if json.Unmarshal(body, &ipResp) == nil && net.ParseIP(strings.TrimSpace(ipResp.IP)) != nil {
-		return strings.TrimSpace(ipResp.IP)
-	}
-	if ip := net.ParseIP(strings.TrimSpace(string(body))); ip != nil {
-		return ip.String()
-	}
-	return ""
-}
-
-// fetchCOLO 从单个 Cloudflare trace 源解析 colo，失败返回 ""
-func fetchCOLO(client *http.Client, url string) string {
-	resp, err := client.Get(url)
-	if err != nil {
-		return ""
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		return ""
-	}
-	body, _ := io.ReadAll(resp.Body)
-	traceStr := string(body)
-	if idx := strings.Index(traceStr, "colo="); idx >= 0 {
-		start := idx + 5
-		end := start
-		for end < len(traceStr) && traceStr[end] != '\r' && traceStr[end] != '\n' {
-			end++
-		}
-		return traceStr[start:end]
-	}
-	return ""
-}
-
-// handleExitInfo 返回缓存的出口信息；缓存过期或 ?refresh=1 时触发一次后台检测
-func handleExitInfo(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	if r.URL.Query().Get("refresh") == "1" {
-		triggerExitDetect()
-	}
-	exitInfoMu.RLock()
-	ip, colo, at := cachedExitIP, cachedCOLO, exitInfoAt
-	exitInfoMu.RUnlock()
-	stale := at.IsZero() || time.Since(at) > exitInfoTTL
-	if stale {
-		triggerExitDetect()
-	}
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"exit_ip":    ip,
-		"colo":       colo,
-		"updated_at": at.Unix(),
-		"stale":      stale,
-	})
-}
-
-func handleWebSocket(w http.ResponseWriter, r *http.Request) {
-	conn, err := upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		log.Printf("[Web] WebSocket 升级失败: %v", err)
-		return
-	}
-	defer conn.Close()
-
-	ticker := time.NewTicker(2 * time.Second)
-	defer ticker.Stop()
-
-	// 用于计算实时速度（单位 B/s）
-	var prevUp, prevDn int64
-	var prevTime time.Time
-	firstTick := true
-
-	for {
-		select {
-		case <-ticker.C:
-			// 计算实时流量（活跃连接的流量之和）
-			var rtUp, rtDn int64
-			activeConns.Range(func(key, value interface{}) bool {
-				info := value.(*connInfo)
-				rtUp += info.upload.Load()
-				rtDn += info.download.Load()
-				return true
-			})
-
-			// 计算增量速度（总上传/下载 - 上次值）/ 实际间隔秒数
-			curUp := totalUpload.Load() + rtUp
-			curDn := totalDownload.Load() + rtDn
-			now := time.Now()
-			speedUp := int64(0)
-			speedDn := int64(0)
-			if !firstTick {
-				dt := now.Sub(prevTime).Seconds()
-				if dt > 0 {
-					speedUp = int64(float64(curUp-prevUp) / dt)
-					speedDn = int64(float64(curDn-prevDn) / dt)
-					if speedUp < 0 {
-						speedUp = 0
-					}
-					if speedDn < 0 {
-						speedDn = 0
-					}
-				}
-			}
-			firstTick = false
-			prevUp = curUp
-			prevDn = curDn
-			prevTime = now
-
-			var m runtime.MemStats
-			runtime.ReadMemStats(&m)
-			data := map[string]interface{}{
-				"active_conns":   activeConnCnt.Load(),
-				"total_upload":   curUp,
-				"total_download": curDn,
-				"rt_upload":      speedUp,
-				"rt_download":    speedDn,
-				"uptime":         time.Since(startTime).Seconds(),
-				"memory_mb":      float64(m.Alloc) / 1024 / 1024,
-			}
-			if err := conn.WriteJSON(data); err != nil {
-				return
-			}
-		case <-r.Context().Done():
-			return
-		}
-	}
-}
-
 // ======================== ECH 支持 ========================
 
 const typeHTTPS = 65
 
-// 全局 HTTP 客户端，复用 TCP 连接
-var dohHTTPClient = &http.Client{
-	Timeout: 10 * time.Second,
-	Transport: &http.Transport{
-		Proxy:             http.ProxyFromEnvironment,
-		MaxIdleConns:      10,
-		IdleConnTimeout:   90 * time.Second,
-		TLSHandshakeTimeout: 10 * time.Second,
-	},
-}
-
 func prepareECH() error {
-	// 如果配置了环境代理，跳过 ECH（代理环境下 ECH 可能不兼容）
-	if hasEnvProxy() {
-		log.Printf("[ECH] 检测到环境代理，跳过 ECH 配置获取")
-		return nil
-	}
-
 	echBase64, err := queryHTTPSRecord(echDomain, dnsServer)
 	if err != nil {
 		return fmt.Errorf("DNS 查询失败: %w", err)
@@ -2886,20 +775,6 @@ func prepareECH() error {
 func refreshECH() error {
 	log.Printf("[ECH] 刷新配置...")
 	return prepareECH()
-}
-
-// retryECHLoop 后台重试获取 ECH 直到成功（启动时 DoH 不通的自愈，避免容器反复退出）
-func retryECHLoop() {
-	t := time.NewTicker(30 * time.Second)
-	defer t.Stop()
-	for range t.C {
-		if err := refreshECH(); err != nil {
-			log.Printf("[警告] ECH 后台重试失败: %v", err)
-			continue
-		}
-		log.Printf("[启动] ECH 配置后台获取成功")
-		return
-	}
 }
 
 func getECHList() ([]byte, error) {
@@ -2989,7 +864,8 @@ func queryDoH(domain, dohURL string) (string, error) {
 	req.Header.Set("Accept", "application/dns-message")
 	req.Header.Set("Content-Type", "application/dns-message")
 
-	resp, err := dohHTTPClient.Do(req)
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("DoH 请求失败: %v", err)
 	}
@@ -3166,34 +1042,6 @@ func queryDoHForProxy(dnsQuery []byte) ([]byte, error) {
 
 // ======================== WebSocket 客户端 ========================
 
-// getEffectiveServerAddr 获取带 ProxyIP 的有效服务器地址
-func getEffectiveServerAddr() string {
-	if proxyIP == "" {
-		return serverAddr
-	}
-	// 分离 host:port 和 path
-	host, port, path, err := parseServerAddr(serverAddr)
-	if err != nil {
-		return serverAddr
-	}
-	// 确保 proxyIP 包含端口
-	proxyHost := proxyIP
-	if !strings.Contains(proxyIP, ":") {
-		proxyHost = proxyIP + ":443"
-	}
-	// 构建新 path
-	if path == "" || path == "/" {
-		path = "/?ip=" + proxyHost
-	} else {
-		if strings.Contains(path, "?") {
-			path = path + "&ip=" + proxyHost
-		} else {
-			path = path + "?ip=" + proxyHost
-		}
-	}
-	return fmt.Sprintf("%s:%s%s", host, port, path)
-}
-
 func parseServerAddr(addr string) (host, port, path string, err error) {
 	path = "/"
 	slashIdx := strings.Index(addr, "/")
@@ -3210,52 +1058,27 @@ func parseServerAddr(addr string) (host, port, path string, err error) {
 	return host, port, path, nil
 }
 
-// hasEnvProxy 检测是否配置了环境代理
-func hasEnvProxy() bool {
-	for _, key := range []string{"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"} {
-		if v := os.Getenv(key); v != "" {
-			return true
-		}
-	}
-	return false
-}
-
 func dialWebSocketWithECH(maxRetries int) (*websocket.Conn, error) {
-	effectiveAddr := getEffectiveServerAddr()
-	host, port, path, err := parseServerAddr(effectiveAddr)
+	host, port, path, err := parseServerAddr(serverAddr)
 	if err != nil {
 		return nil, err
 	}
 
 	wsURL := fmt.Sprintf("wss://%s:%s%s", host, port, path)
-	useProxy := hasEnvProxy()
 
 	for attempt := 1; attempt <= maxRetries; attempt++ {
-		var tlsCfg *tls.Config
+		echBytes, echErr := getECHList()
+		if echErr != nil {
+			if attempt < maxRetries {
+				refreshECH()
+				continue
+			}
+			return nil, echErr
+		}
 
-		if useProxy {
-			// 通过环境代理连接时跳过 ECH（ECH 在代理隧道中可能不兼容）
-			tlsCfg = &tls.Config{
-				ServerName: host,
-				MinVersion: tls.VersionTLS13,
-			}
-			if attempt == 1 {
-				log.Printf("[代理] 检测到环境代理，跳过 ECH 直接连接")
-			}
-		} else {
-			echBytes, echErr := getECHList()
-			if echErr != nil {
-				if attempt < maxRetries {
-					refreshECH()
-					continue
-				}
-				return nil, echErr
-			}
-
-			tlsCfg, err = buildTLSConfigWithECH(host, echBytes)
-			if err != nil {
-				return nil, err
-			}
+		tlsCfg, tlsErr := buildTLSConfigWithECH(host, echBytes)
+		if tlsErr != nil {
+			return nil, tlsErr
 		}
 
 		dialer := websocket.Dialer{
@@ -3267,11 +1090,9 @@ func dialWebSocketWithECH(maxRetries int) (*websocket.Conn, error) {
 				return []string{token}
 			}(),
 			HandshakeTimeout: 10 * time.Second,
-			Proxy:            http.ProxyFromEnvironment,
 		}
 
-		// 只有在没有配置环境代理时才使用自定义拨号连接固定 IP
-		if serverIP != "" && !useProxy {
+		if serverIP != "" {
 			dialer.NetDial = func(network, address string) (net.Conn, error) {
 				_, port, err := net.SplitHostPort(address)
 				if err != nil {
@@ -3283,7 +1104,7 @@ func dialWebSocketWithECH(maxRetries int) (*websocket.Conn, error) {
 
 		wsConn, _, dialErr := dialer.Dial(wsURL, nil)
 		if dialErr != nil {
-			if !useProxy && strings.Contains(dialErr.Error(), "ECH") && attempt < maxRetries {
+			if strings.Contains(dialErr.Error(), "ECH") && attempt < maxRetries {
 				log.Printf("[ECH] 连接失败，尝试刷新配置 (%d/%d)", attempt, maxRetries)
 				refreshECH()
 				time.Sleep(time.Second)
@@ -3309,27 +1130,6 @@ func runProxyServer(addr string) {
 
 	log.Printf("[代理] 服务器启动: %s (支持 SOCKS5 和 HTTP)", addr)
 	log.Printf("[代理] 后端服务器: %s", serverAddr)
-	if recycleEnabled && (recycleBytes > 0 || recycleDuration > 0) {
-		bytesDesc := "关闭"
-		if recycleBytes > 0 {
-			bytesDesc = formatBytes(recycleBytes)
-		}
-		durDesc := "关闭"
-		if recycleDuration > 0 {
-			durDesc = recycleDuration.String()
-		}
-		log.Printf("[代理] 连接老化自愈: 流量阈值 %s, 时长阈值 %s（达到即断开等待播放器重连）", bytesDesc, durDesc)
-	} else {
-		log.Printf("[代理] 连接老化自愈: 已关闭")
-	}
-	switch {
-	case !fallbackEnabled:
-		log.Printf("[兜底] 已关闭（-fallback off），ECH 隧道失败直接返回错误")
-	case upstreamAddr == "":
-		log.Printf("[兜底] 未配置 -upstream，ECH 隧道失败直接返回错误")
-	default:
-		log.Printf("[兜底] ECH 隧道失败将自动改走上游: %s (%s)", upstreamAddr, upstreamKind)
-	}
 	if serverIP != "" {
 		log.Printf("[代理] 使用固定 IP: %s", serverIP)
 	}
@@ -3349,14 +1149,6 @@ func handleConnection(conn net.Conn) {
 	defer conn.Close()
 
 	clientAddr := conn.RemoteAddr().String()
-
-	// 启用 TCP_NODELAY 降低延迟，对视频流等交互式流量重要
-	if tcpConn, ok := conn.(*net.TCPConn); ok {
-		tcpConn.SetNoDelay(true)
-		tcpConn.SetReadBuffer(256 * 1024)
-		tcpConn.SetWriteBuffer(256 * 1024)
-	}
-
 	conn.SetDeadline(time.Now().Add(30 * time.Second))
 
 	// 读取第一个字节判断协议
@@ -3787,7 +1579,7 @@ func handleTunnel(conn net.Conn, target, clientAddr string, mode int, firstFrame
 		targetHost = target
 	}
 
-	// 分流决策：三出站（直连 / 本地上游 / ECH）+ 命中依据（R1：依据进面板）
+	// 分流决策：自定义规则优先（直连/代理），未命中按分流模式
 	out, matchedRule := routeDecision(targetHost)
 
 	modeStr := "socks5"
@@ -3802,78 +1594,32 @@ func handleTunnel(conn net.Conn, target, clientAddr string, mode int, firstFrame
 		return handleDirectConnection(conn, target, clientAddr, mode, firstFrame, matchedRule)
 	}
 
-	// 规则指定走本地上游（-upstream，如 Clash）：拨不通则自动回退 ECH，ECH 再失败才 502。
-	// 这里不看 -fallback 开关（那是 ECH 失败兜底的开关），规则出站始终按规则走。
-	if out == outUpstream {
-		if up := dialUpstreamForRule(clientAddr, target); up != nil {
-			log.Printf("[分流] %s -> %s (本地上游, 模式=%s, 依据=%s)", clientAddr, target, routingMode, matchedRule)
-			return runFallbackTunnel(conn, up, "", clientAddr, target, modeStr, mode, firstFrame, matchedRule, "upstream")
-		}
-		matchedRule += "（本地代理不可用，改走 ECH）"
-	}
-
-	// 走 ECH 隧道
+	// 走代理
 	connID := addConn(clientAddr, target, modeStr, "proxy", matchedRule)
-	connInfoObj, _ := activeConns.Load(connID)
-	connInfoPtr := connInfoObj.(*connInfo)
+	defer removeConn(connID)
+	connPtr, _ := getConnInfo(connID)
 
 	log.Printf("[分流] %s -> %s (通过代理, 模式=%s, 依据=%s)", clientAddr, target, routingMode, matchedRule)
-	var wsConn *websocket.Conn
-	wsConn, err = dialWebSocketWithECH(2)
-	// ECH 隧道建立失败的统一出口：先尝试本地 Clash 兜底，兜不住再回错误给客户端。
-	// 下面这些位置客户端都还没收到握手响应，改走上游对客户端完全无感。
-	fallbackOrFail := func(reason string, cause error) error {
-		if up := dialFallback(clientAddr, target, reason); up != nil {
-			if wsConn != nil {
-				wsConn.Close()
-			}
-			return runFallbackTunnel(conn, up, connID, clientAddr, target, modeStr, mode, firstFrame, matchedRule, "clash")
-		}
-		removeConn(connID)
-		sendErrorResponse(conn, mode)
-		return cause
-	}
+	wsConn, err := dialWebSocketWithECH(2)
 	if err != nil {
-		return fallbackOrFail("拨号失败: "+err.Error(), err)
+		sendErrorResponse(conn, mode)
+		return err
 	}
-
-	// 记录实际拨通的远端地址 (ECH 隧道服务端)
-	if connInfoPtr != nil {
-		connInfoPtr.DialedAddr = wsConn.RemoteAddr().String()
-	}
+	defer wsConn.Close()
+	connPtr.setDialed(wsConn.RemoteAddr().String())
 
 	var mu sync.Mutex
-	var closed atomic.Bool
-	closeOnce := sync.Once{}
-	cleanup := func() {
-		closeOnce.Do(func() {
-			closed.Store(true)
-			wsConn.Close()
-			conn.Close()
-		})
-	}
-	defer cleanup()
 
-	// 保活 + WebSocket 读取/写入超时管理
-	wsConn.SetReadDeadline(time.Now().Add(120 * time.Second))
-	wsConn.SetPongHandler(func(string) error {
-		wsConn.SetReadDeadline(time.Now().Add(120 * time.Second))
-		return nil
-	})
-
-	stopPing := make(chan struct{})
+	// 保活
+	stopPing := make(chan bool)
 	go func() {
-		ticker := time.NewTicker(20 * time.Second)
+		ticker := time.NewTicker(10 * time.Second)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-ticker.C:
 				mu.Lock()
-				if !closed.Load() {
-					wsConn.SetWriteDeadline(time.Now().Add(15 * time.Second))
-					wsConn.WriteMessage(websocket.PingMessage, nil)
-					wsConn.SetWriteDeadline(time.Time{})
-				}
+				wsConn.WriteMessage(websocket.PingMessage, nil)
 				mu.Unlock()
 			case <-stopPing:
 				return
@@ -3887,7 +1633,7 @@ func handleTunnel(conn net.Conn, target, clientAddr string, mode int, firstFrame
 	// 如果没有预设的 firstFrame，尝试读取第一帧数据（仅 SOCKS5）
 	if firstFrame == "" && mode == modeSOCKS5 {
 		_ = conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
-		buffer := make([]byte, 65536)
+		buffer := make([]byte, 32768)
 		n, _ := conn.Read(buffer)
 		_ = conn.SetReadDeadline(time.Time{})
 		if n > 0 {
@@ -3901,63 +1647,56 @@ func handleTunnel(conn net.Conn, target, clientAddr string, mode int, firstFrame
 	err = wsConn.WriteMessage(websocket.TextMessage, []byte(connectMsg))
 	mu.Unlock()
 	if err != nil {
-		return fallbackOrFail("发送 CONNECT 失败: "+err.Error(), err)
+		sendErrorResponse(conn, mode)
+		return err
 	}
 
 	// 等待响应
 	_, msg, err := wsConn.ReadMessage()
 	if err != nil {
-		return fallbackOrFail("握手读取失败: "+err.Error(), err)
+		sendErrorResponse(conn, mode)
+		return err
 	}
 
 	response := string(msg)
 	if strings.HasPrefix(response, "ERROR:") {
-		reason := strings.TrimPrefix(response, "ERROR:")
-		return fallbackOrFail("服务端拒绝: "+reason, errors.New(response))
+		sendErrorResponse(conn, mode)
+		return errors.New(response)
 	}
 	if response != "CONNECTED" {
-		return fallbackOrFail("意外响应: "+response, fmt.Errorf("意外响应: %s", response))
+		sendErrorResponse(conn, mode)
+		return fmt.Errorf("意外响应: %s", response)
 	}
 
 	// 发送成功响应（根据模式不同而不同）
 	if err := sendSuccessResponse(conn, mode); err != nil {
-		removeConn(connID)
 		return err
 	}
 
 	log.Printf("[代理] %s 已连接: %s", clientAddr, target)
 
 	// 双向转发
-	done := make(chan struct{})
+	done := make(chan bool, 2)
 
 	// Client -> Server
 	go func() {
-		defer func() { select { case done <- struct{}{}: default: } }()
-		buf := make([]byte, 65536)
+		buf := make([]byte, 32768)
 		for {
 			n, err := conn.Read(buf)
 			if err != nil {
-				if !isNormalCloseError(err) {
-					log.Printf("[代理] %s 客户端读取错误: %v", clientAddr, err)
-				}
 				mu.Lock()
-				if !closed.Load() {
-					wsConn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-					wsConn.WriteMessage(websocket.TextMessage, []byte("CLOSE"))
-					wsConn.SetWriteDeadline(time.Time{})
-				}
+				wsConn.WriteMessage(websocket.TextMessage, []byte("CLOSE"))
 				mu.Unlock()
+				done <- true
 				return
 			}
-
-			connInfoPtr.upload.Add(int64(n))
+			connPtr.addUp(int64(n))
 
 			mu.Lock()
-			wsConn.SetWriteDeadline(time.Now().Add(30 * time.Second))
 			err = wsConn.WriteMessage(websocket.BinaryMessage, buf[:n])
-			wsConn.SetWriteDeadline(time.Time{})
 			mu.Unlock()
 			if err != nil {
+				done <- true
 				return
 			}
 		}
@@ -3965,77 +1704,29 @@ func handleTunnel(conn net.Conn, target, clientAddr string, mode int, firstFrame
 
 	// Server -> Client
 	go func() {
-		defer func() { select { case done <- struct{}{}: default: } }()
 		for {
 			mt, msg, err := wsConn.ReadMessage()
 			if err != nil {
-				if !isNormalCloseError(err) {
-					log.Printf("[代理] %s WebSocket 读取错误: %v", clientAddr, err)
-				}
+				done <- true
 				return
 			}
-
-			wsConn.SetReadDeadline(time.Now().Add(120 * time.Second))
+			connPtr.addDn(int64(len(msg)))
 
 			if mt == websocket.TextMessage {
 				if string(msg) == "CLOSE" {
+					done <- true
 					return
 				}
 			}
 
-			connInfoPtr.download.Add(int64(len(msg)))
-
-			written := 0
-			for written < len(msg) {
-				n, err := conn.Write(msg[written:])
-				if err != nil {
-					return
-				}
-				written += n
+			if _, err := conn.Write(msg); err != nil {
+				done <- true
+				return
 			}
 		}
 	}()
 
-	// ========== 连接老化自愈：到量/到时主动断开 ==========
-	// 结构完全复用上面的 stopIdle 巡检 goroutine：defer close(stop) 防泄漏，
-	// 触发时调用既有的 cleanup()（sync.Once，与空闲超时清理同一条收尾路径）。
-	stopRecycle := make(chan struct{})
-	defer close(stopRecycle)
-	if recycleEnabled && (recycleBytes > 0 || recycleDuration > 0) {
-		startAt := time.Now()
-		go func() {
-			ticker := time.NewTicker(5 * time.Second)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-ticker.C:
-					total := connInfoPtr.upload.Load() + connInfoPtr.download.Load()
-					if total <= 0 {
-						continue
-					}
-					if recycleBytes > 0 && total >= recycleBytes {
-						log.Printf("[老化] %s 已传输 %s（阈值 %s），主动断开等待播放器重连: %s",
-							clientAddr, formatBytes(total), formatBytes(recycleBytes), target)
-						cleanup()
-						return
-					}
-					if recycleDuration > 0 && time.Since(startAt) >= recycleDuration {
-						log.Printf("[老化] %s 已存活 %s（阈值 %s，已传输 %s），主动断开等待播放器重连: %s",
-							clientAddr, time.Since(startAt).Round(time.Second), recycleDuration,
-							formatBytes(total), target)
-						cleanup()
-						return
-					}
-				case <-stopRecycle:
-					return
-				}
-			}
-		}()
-	}
-
 	<-done
-	cleanup()
-	removeConn(connID)
 	log.Printf("[代理] %s 已断开: %s", clientAddr, target)
 	return nil
 }
@@ -4064,65 +1755,46 @@ func handleDirectConnection(conn net.Conn, target, clientAddr string, mode int, 
 		modeStr = "http-proxy"
 	}
 	connID := addConn(clientAddr, target, modeStr, "direct", matchedRule)
-	connInfoObj, _ := activeConns.Load(connID)
-	connInfoPtr := connInfoObj.(*connInfo)
+	defer removeConn(connID)
+	connPtr, _ := getConnInfo(connID)
 
 	// 直接连接到目标
 	targetConn, err := net.DialTimeout("tcp", target, 10*time.Second)
 	if err != nil {
-		removeConn(connID)
 		sendErrorResponse(conn, mode)
 		return fmt.Errorf("直连失败: %w", err)
 	}
-
-	// 记录实际拨通的远端地址
-	if connInfoPtr != nil {
-		connInfoPtr.DialedAddr = targetConn.RemoteAddr().String()
-	}
-
-	// 对直连目标也启用 TCP_NODELAY
-	if tcpConn, ok := targetConn.(*net.TCPConn); ok {
-		tcpConn.SetNoDelay(true)
-		tcpConn.SetReadBuffer(256 * 1024)
-		tcpConn.SetWriteBuffer(256 * 1024)
-	}
-
-	closeOnce := sync.Once{}
-	cleanup := func() {
-		closeOnce.Do(func() {
-			targetConn.Close()
-			conn.Close()
-		})
-	}
-	defer cleanup()
-
-	conn.SetDeadline(time.Time{})
+	defer targetConn.Close()
+	connPtr.setDialed(targetConn.RemoteAddr().String())
 
 	// 发送成功响应
 	if err := sendSuccessResponse(conn, mode); err != nil {
-		removeConn(connID)
 		return err
 	}
 
 	// 如果有预设的第一帧数据，先发送
 	if firstFrame != "" {
-		data := []byte(firstFrame)
-		written := 0
-		for written < len(data) {
-			n, err := targetConn.Write(data[written:])
-			if err != nil {
-				removeConn(connID)
-				return err
-			}
-			written += n
+		if _, err := targetConn.Write([]byte(firstFrame)); err != nil {
+			return err
 		}
 	}
 
-	// 双向转发（与 Clash 兜底共用 relayRaw）
-	relayRaw(conn, targetConn, connInfoPtr)
+	// 双向转发
+	done := make(chan bool, 2)
 
-	cleanup()
-	removeConn(connID)
+	// Client -> Target
+	go func() {
+		copyCount(targetConn, conn, connPtr, true)
+		done <- true
+	}()
+
+	// Target -> Client
+	go func() {
+		copyCount(conn, targetConn, connPtr, false)
+		done <- true
+	}()
+
+	<-done
 	log.Printf("[分流] %s 直连已断开: %s", clientAddr, target)
 	return nil
 }
@@ -4153,4 +1825,1598 @@ func sendSuccessResponse(conn net.Conn, mode int) error {
 		return nil
 	}
 	return nil
+}
+
+// ======================== 配置与面板类型 ========================
+
+// customRule 自定义规则
+type customRule struct {
+	Type   string `json:"type"`   // domain, ipcidr, keyword, cfip
+	Value  string `json:"value"`  // 规则值（cfip 为可选备注，匹配只看内置 CF 段）
+	Action string `json:"action"` // proxy(ECH) 或 direct
+}
+
+// appConfig 应用配置
+type appConfig struct {
+	ListenAddr  string   `json:"listen_addr"`
+	ServerAddr  string   `json:"server_addr"`
+	ServerIP    string   `json:"server_ip"`
+	Token       string   `json:"token"`
+	DNSServer   string   `json:"dns_server"`
+	ECHDomain   string   `json:"ech_domain"`
+	RoutingMode string   `json:"routing_mode"`
+	WebAddr     string   `json:"web_addr"`
+	WebPassword string   `json:"web_password"`
+	CfipAdd     []string `json:"cfip_add"`
+	CfipDel     []string `json:"cfip_del"`
+}
+
+// loadConfig 从文件加载配置
+func loadConfig(filePath string) (*appConfig, error) {
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil, err
+	}
+	var cfg appConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return nil, err
+	}
+	return &cfg, nil
+}
+
+// saveConfig 保存配置到文件
+func saveConfig(filePath string) error {
+	cfg := appConfig{
+		ListenAddr:  listenAddr,
+		ServerAddr:  serverAddr,
+		ServerIP:    serverIP,
+		Token:       token,
+		DNSServer:   dnsServer,
+		ECHDomain:   echDomain,
+		RoutingMode: routingMode,
+		WebAddr:     webAddr,
+		WebPassword: webPassword,
+		CfipAdd:     cfipAdd,
+		CfipDel:     cfipDel,
+	}
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return err
+	}
+	if dir := filepath.Dir(filePath); dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return fmt.Errorf("创建配置目录失败: %w", err)
+		}
+	}
+	return os.WriteFile(filePath, data, 0600)
+}
+
+// appVersion 面板与镜像版本号（发版时同步改这里 + workflow tag）
+const appVersion = "1.4"
+
+// validHostPort 校验 host:port 格式（:30001、0.0.0.0:30000、example.com:443 均合法）
+func validHostPort(s string) bool {
+	_, port, err := net.SplitHostPort(s)
+	return err == nil && port != ""
+}
+
+// normalizeWebAddr 面板地址宽容输入：纯端口（如 "30001"）补成 ":30001"，其余原样返回
+func normalizeWebAddr(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return s
+	}
+	if _, err := strconv.Atoi(s); err == nil {
+		return ":" + s
+	}
+	return s
+}
+
+// statusResponse 状态响应
+type statusResponse struct {
+	Version       string  `json:"version"`
+	Uptime        string  `json:"uptime"`
+	TotalConns    int64   `json:"total_conns"`
+	ActiveConns   int     `json:"active_conns"`
+	TotalUpload   int64   `json:"total_upload"`
+	TotalDownload int64   `json:"total_download"`
+	RoutingMode   string  `json:"routing_mode"`
+	ListenAddr    string  `json:"listen_addr"`
+	ServerAddr    string  `json:"server_addr"`
+	ECHDomain     string  `json:"ech_domain"`
+	WebAddr       string  `json:"web_addr"`
+	CustomRules   int     `json:"custom_rules"`
+	MemoryMB      float64 `json:"memory_mb"`
+}
+
+// applyEnvDefaults 从环境变量加载默认值（命令行参数优先）
+// 支持: ECH_LISTEN, ECH_SERVER, ECH_SERVER_IP, ECH_TOKEN, ECH_DNS, ECH_DOMAIN,
+//
+//	ECH_ROUTING, ECH_WEB, ECH_PASSWORD, ECH_CONFIG, ECH_RULES_DATA, ECH_RESTART_AT
+func applyEnvDefaults() {
+	if v := os.Getenv("ECH_LISTEN"); v != "" && listenAddr == "0.0.0.0:30000" {
+		listenAddr = v
+	}
+	if v := os.Getenv("ECH_SERVER"); v != "" && serverAddr == "hhech.nb1tap.kdns.fr:443" {
+		serverAddr = v
+	}
+	if v := os.Getenv("ECH_SERVER_IP"); v != "" && serverIP == "" {
+		serverIP = v
+	}
+	if v := os.Getenv("ECH_TOKEN"); v != "" && token == "honghongfree" {
+		token = v
+	}
+	if v := os.Getenv("ECH_DNS"); v != "" && dnsServer == "dns.alidns.com/dns-query" {
+		dnsServer = v
+	}
+	if v := os.Getenv("ECH_DOMAIN"); v != "" && echDomain == "cloudflare-ech.com" {
+		echDomain = v
+	}
+	if v := os.Getenv("ECH_ROUTING"); v != "" && routingMode == "bypass_cn" {
+		routingMode = v
+	}
+	if v := os.Getenv("ECH_WEB"); v != "" && webAddr == "" {
+		webAddr = v
+	}
+	if v := os.Getenv("ECH_PASSWORD"); v != "" && webPassword == "" {
+		webPassword = v
+	}
+	if v := os.Getenv("ECH_CONFIG"); v != "" && configFile == "/data/config.json" {
+		configFile = v
+	}
+	if v := os.Getenv("ECH_RULES_DATA"); v != "" && rulesData == "/data/rules.json" {
+		rulesData = v
+	}
+	if v := os.Getenv("ECH_RESTART_AT"); v != "" && restartAtRaw == "05:00" {
+		restartAtRaw = v
+	}
+}
+
+// ======================== 日志缓冲 ========================
+
+// logWriter 日志写出器：写 stderr 的同时进入缓冲（面板日志页读取）
+type logWriter struct {
+	original io.Writer
+}
+
+func (w *logWriter) Write(p []byte) (int, error) {
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				w.original.Write([]byte(fmt.Sprintf("[logWriter panic: %v]\n", r)))
+			}
+		}()
+		msg := strings.TrimSpace(string(p))
+		if msg != "" {
+			level := "info"
+			if strings.Contains(msg, "[警告]") || strings.Contains(msg, "warn") {
+				level = "warn"
+			} else if strings.Contains(msg, "[错误]") || strings.Contains(msg, "fatal") || strings.Contains(msg, "error") {
+				level = "error"
+			}
+			addLog(level, msg)
+		}
+	}()
+	return w.original.Write(p)
+}
+
+// addLog 添加日志到缓冲
+func addLog(level, msg string) {
+	entry := logEntry{
+		Time:  time.Now().Format("2006-01-02 15:04:05"),
+		Level: level,
+		Msg:   msg,
+	}
+	logBufferMu.Lock()
+	logBuffer = append(logBuffer, entry)
+	if len(logBuffer) > 200 {
+		logBuffer = logBuffer[len(logBuffer)-200:]
+	}
+	logBufferMu.Unlock()
+}
+
+// ======================== Web 管理面板类型 ========================
+
+// connInfo 连接信息
+type connInfo struct {
+	ID         string
+	Source     string
+	Target     string
+	Mode       string
+	Rule       string
+	Matched    string // 命中依据（哪条规则 / 哪个分流模式），面板可观测
+	DialedAddr string // 实际拨通的远端地址
+	StartTime  time.Time
+	upload     atomic.Int64
+	download   atomic.Int64
+}
+
+// connInfoResp 用于 JSON 序列化的连接信息（不含 atomic 字段）
+type connInfoResp struct {
+	ID         string    `json:"id"`
+	Source     string    `json:"source"`
+	Target     string    `json:"target"`
+	Mode       string    `json:"mode"`
+	Rule       string    `json:"rule"`
+	Matched    string    `json:"matched"`
+	DialedAddr string    `json:"dialed_addr"`
+	Upload     int64     `json:"upload"`
+	Download   int64     `json:"download"`
+	StartTime  time.Time `json:"start_time"`
+}
+
+// logEntry 日志条目
+type logEntry struct {
+	Time  string `json:"time"`
+	Level string `json:"level"`
+	Msg   string `json:"msg"`
+}
+
+// addUp/addDn 计数（nil 安全）
+func (c *connInfo) addUp(n int64) {
+	if c != nil {
+		c.upload.Add(n)
+	}
+}
+
+func (c *connInfo) addDn(n int64) {
+	if c != nil {
+		c.download.Add(n)
+	}
+}
+
+// setDialed 记录实际拨通的远端地址（nil 安全）
+func (c *connInfo) setDialed(addr string) {
+	if c != nil && addr != "" {
+		c.DialedAddr = addr
+	}
+}
+
+// ======================== 连接追踪与流量统计 ========================
+
+// addConn 添加连接追踪
+func addConn(source, target, mode, rule, matched string) string {
+	id := fmt.Sprintf("%d", connIDCounter.Add(1))
+	info := &connInfo{
+		ID:        id,
+		Source:    source,
+		Target:    target,
+		Mode:      mode,
+		Rule:      rule,
+		Matched:   matched,
+		StartTime: time.Now(),
+	}
+	activeConns.Store(id, info)
+	activeConnCnt.Add(1)
+	totalConns.Add(1)
+	return id
+}
+
+// removeConn 移除连接追踪，将流量计入总统计
+func removeConn(id string) {
+	if v, ok := activeConns.LoadAndDelete(id); ok {
+		activeConnCnt.Add(-1)
+		info := v.(*connInfo)
+		totalUpload.Add(info.upload.Load())
+		totalDownload.Add(info.download.Load())
+	}
+}
+
+// getConnInfo 按 ID 获取连接信息
+func getConnInfo(id string) (*connInfo, bool) {
+	v, ok := activeConns.Load(id)
+	if !ok {
+		return nil, false
+	}
+	info, ok := v.(*connInfo)
+	return info, ok
+}
+
+// getActiveConns 获取所有活跃连接
+func getActiveConns() []connInfoResp {
+	var conns []connInfoResp
+	activeConns.Range(func(key, value interface{}) bool {
+		info := value.(*connInfo)
+		conns = append(conns, connInfoResp{
+			ID:         info.ID,
+			Source:     info.Source,
+			Target:     info.Target,
+			Mode:       info.Mode,
+			Rule:       info.Rule,
+			Matched:    info.Matched,
+			DialedAddr: info.DialedAddr,
+			Upload:     info.upload.Load(),
+			Download:   info.download.Load(),
+			StartTime:  info.StartTime,
+		})
+		return true
+	})
+	return conns
+}
+
+// copyCount 直连方向复制并统计字节数
+func copyCount(dst io.Writer, src io.Reader, info *connInfo, upload bool) {
+	buf := make([]byte, 32768)
+	for {
+		n, err := src.Read(buf)
+		if n > 0 {
+			if _, werr := dst.Write(buf[:n]); werr != nil {
+				if info != nil {
+					if upload {
+						info.upload.Add(int64(n))
+					} else {
+						info.download.Add(int64(n))
+					}
+				}
+				return
+			}
+			if info != nil {
+				if upload {
+					info.upload.Add(int64(n))
+				} else {
+					info.download.Add(int64(n))
+				}
+			}
+		}
+		if err != nil {
+			return
+		}
+	}
+}
+
+// ======================== DNS 解析缓存 ========================
+
+// lookupIPWithCache 带缓存的 DNS 查询（规则 ipcidr/cfip 匹配域名时用，缓存 5 分钟）
+func lookupIPWithCache(host string) ([]net.IP, error) {
+	dnsCacheMu.RLock()
+	entry, ok := dnsCache[host]
+	dnsCacheMu.RUnlock()
+
+	if ok && time.Now().Before(entry.expiresAt) {
+		return entry.ips, nil
+	}
+
+	ips, err := net.LookupIP(host)
+	if err != nil {
+		return nil, err
+	}
+
+	dnsCacheMu.Lock()
+	dnsCache[host] = dnsCacheEntry{
+		ips:       ips,
+		expiresAt: time.Now().Add(5 * time.Minute),
+	}
+	// 简单清理：超过 1000 条时清空
+	if len(dnsCache) > 1000 {
+		for k := range dnsCache {
+			delete(dnsCache, k)
+		}
+	}
+	dnsCacheMu.Unlock()
+
+	return ips, nil
+}
+
+// ======================== 分流决策 ========================
+
+// outboundKind 出站类型：仅直连与 ECH 两种出站
+type outboundKind int
+
+const (
+	outDirect outboundKind = iota // 本地直连
+	outECH                        // ECH 隧道
+)
+
+// ruleActionToOutbound 规则动作 → 出站类型（proxy 缺省按 ECH 处理）
+func ruleActionToOutbound(action string) outboundKind {
+	if action == "direct" {
+		return outDirect
+	}
+	return outECH
+}
+
+// routeDecision 分流决策：自定义规则优先级最高（任何分流模式下都生效），
+// 未命中规则时按原版分流模式（global/bypass_cn/none/custom）决定；
+// 同时返回命中依据（面板"依据"列，让连接为什么走这条路可见）。
+func routeDecision(targetHost string) (out outboundKind, matched string) {
+	// 1. 自定义规则（直连列表 / 代理列表）
+	if hit, rule, out2 := matchCustomRule(targetHost); hit {
+		if out2 == outDirect {
+			return outDirect, fmt.Sprintf("规则 %s:%s → 直连", rule.Type, rule.Value)
+		}
+		return outECH, fmt.Sprintf("规则 %s:%s → 代理", rule.Type, rule.Value)
+	}
+
+	// 2. 未命中规则：按分流模式（原版 shouldBypassProxy 逻辑不变）
+	if shouldBypassProxy(targetHost) {
+		return outDirect, fmt.Sprintf("模式 %s → 直连", routingMode)
+	}
+	return outECH, fmt.Sprintf("模式 %s → 代理", routingMode)
+}
+
+// matchCustomRule 匹配自定义规则，返回 (是否命中, 命中的规则, 出站类型)
+func matchCustomRule(targetHost string) (bool, customRule, outboundKind) {
+	customRulesMu.RLock()
+	defer customRulesMu.RUnlock()
+
+	if len(customRules) == 0 {
+		return false, customRule{}, outECH
+	}
+
+	host := strings.ToLower(strings.TrimSpace(targetHost))
+	// 检查是否是IP地址
+	isIP := net.ParseIP(host) != nil
+
+	// ipcidr/cfip 规则对域名目标同样生效——按规则顺序遍历，遇到第一条需要 IP 的规则时才解析一次
+	var resolvedIPs []net.IP
+	resolved := false
+	resolveOnce := func() {
+		if resolved {
+			return
+		}
+		resolved = true
+		if ips, err := lookupIPWithCache(host); err == nil {
+			resolvedIPs = ips
+		}
+	}
+
+	for _, rule := range customRules {
+		switch rule.Type {
+		case "domain":
+			if !isIP {
+				value := strings.ToLower(strings.TrimSpace(rule.Value))
+				matched := false
+				// 支持通配符 *.domain
+				if strings.HasPrefix(value, "*.") {
+					suffix := strings.TrimPrefix(value, "*.")
+					if host == suffix || strings.HasSuffix(host, "."+suffix) {
+						matched = true
+					}
+				} else {
+					// 精确匹配或子域名匹配
+					if host == value || strings.HasSuffix(host, "."+value) {
+						matched = true
+					}
+				}
+				if matched {
+					return true, rule, ruleActionToOutbound(rule.Action)
+				}
+			}
+		case "ipcidr":
+			_, cidr, err := net.ParseCIDR(rule.Value)
+			if err != nil {
+				continue
+			}
+			if isIP {
+				if ip := net.ParseIP(host); ip != nil && cidr.Contains(ip) {
+					return true, rule, ruleActionToOutbound(rule.Action)
+				}
+				continue
+			}
+			// 域名目标：解析后回查（解析结果由 lookupIPWithCache 缓存 5 分钟）
+			resolveOnce()
+			for _, ip := range resolvedIPs {
+				if cidr.Contains(ip) {
+					return true, rule, ruleActionToOutbound(rule.Action)
+				}
+			}
+		case "cfip":
+			// 内置 Cloudflare IP 段匹配：IP 字面量直接查，域名先解析再查
+			if isIP {
+				if ip := net.ParseIP(host); ip != nil && isCloudflareIP(ip) {
+					return true, rule, ruleActionToOutbound(rule.Action)
+				}
+				continue
+			}
+			resolveOnce()
+			for _, ip := range resolvedIPs {
+				if isCloudflareIP(ip) {
+					return true, rule, ruleActionToOutbound(rule.Action)
+				}
+			}
+		case "keyword":
+			if rule.Value != "" && strings.Contains(host, strings.ToLower(rule.Value)) {
+				return true, rule, ruleActionToOutbound(rule.Action)
+			}
+		}
+	}
+	// 没有匹配规则
+	return false, customRule{}, outECH
+}
+
+// ======================== CF 网段（cfip 规则 + 面板增删管理） ========================
+
+// cfIPNets 内置 Cloudflare IP 段快照（来源 https://www.cloudflare.com/ips/ ，页面标注最后更新 2023-09-28）。
+// 用于 cfip 规则类型：目标 IP 命中这些网段即算 Cloudflare IP。
+var cfIPNets = mustParseCIDRs([]string{
+	// IPv4
+	"103.21.244.0/22", "103.22.200.0/22", "103.31.4.0/22", "104.16.0.0/13",
+	"104.24.0.0/14", "108.162.192.0/18", "131.0.72.0/22", "141.101.64.0/18",
+	"162.158.0.0/15", "172.64.0.0/13", "173.245.48.0/20", "188.114.96.0/20",
+	"190.93.240.0/20", "197.234.240.0/22", "198.41.128.0/17",
+	// IPv6
+	"2400:cb00::/32", "2606:4700::/32", "2803:f800::/32", "2405:b500::/32",
+	"2405:8100::/32", "2a06:98c0::/29", "2c0f:f248::/32",
+})
+
+// mustParseCIDRs 解析内置网段（字面量写错时 panic，等价于编译期暴露问题）
+func mustParseCIDRs(cidrs []string) []*net.IPNet {
+	nets := make([]*net.IPNet, 0, len(cidrs))
+	for _, c := range cidrs {
+		_, n, err := net.ParseCIDR(c)
+		if err != nil {
+			panic("内置 CF 网段解析失败: " + c)
+		}
+		nets = append(nets, n)
+	}
+	return nets
+}
+
+// cfEffectiveNets 生效 CF 网段 = 内置快照 ∪ 用户新增 − 用户删除
+var (
+	cfEffectiveNets []*net.IPNet
+	cfEffectiveMu   sync.RWMutex
+)
+
+// rebuildCFNets 重建生效 CF 网段（启动加载配置后与 /api/cfips 变更时调用）
+func rebuildCFNets() {
+	del := make(map[string]bool, len(cfipDel))
+	for _, c := range cfipDel {
+		if _, n, err := net.ParseCIDR(strings.TrimSpace(c)); err == nil {
+			del[n.String()] = true
+		}
+	}
+	seen := make(map[string]bool)
+	var out []*net.IPNet
+	for _, n := range cfIPNets {
+		if !del[n.String()] {
+			out = append(out, n)
+			seen[n.String()] = true
+		}
+	}
+	for _, c := range cfipAdd {
+		if _, n, err := net.ParseCIDR(strings.TrimSpace(c)); err == nil && !seen[n.String()] {
+			out = append(out, n)
+			seen[n.String()] = true
+		}
+	}
+	cfEffectiveMu.Lock()
+	cfEffectiveNets = out
+	cfEffectiveMu.Unlock()
+}
+
+// cfStrs 网段列表转字符串（面板展示用）
+func cfStrs(nets []*net.IPNet) []string {
+	out := make([]string, 0, len(nets))
+	for _, n := range nets {
+		out = append(out, n.String())
+	}
+	return out
+}
+
+// isCloudflareIP 判断 IP 是否落在生效 CF 段内
+func isCloudflareIP(ip net.IP) bool {
+	cfEffectiveMu.RLock()
+	nets := cfEffectiveNets
+	cfEffectiveMu.RUnlock()
+	if nets == nil {
+		nets = cfIPNets
+	}
+	for _, n := range nets {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// ======================== 自定义规则 ========================
+
+// parseRulesFile 解析规则文件（CSV：type,value,action），返回解析出的规则
+func parseRulesFile(filePath string) ([]customRule, error) {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("打开规则文件失败: %w", err)
+	}
+	defer file.Close()
+
+	var rules []customRule
+	skippedUpstream := 0
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "//") {
+			continue
+		}
+
+		parts := strings.SplitN(line, ",", 3)
+		if len(parts) != 3 {
+			continue
+		}
+
+		ruleType := strings.TrimSpace(parts[0])
+		value := strings.TrimSpace(parts[1])
+		action := strings.TrimSpace(parts[2])
+
+		if ruleType != "domain" && ruleType != "ipcidr" && ruleType != "keyword" && ruleType != "cfip" {
+			continue
+		}
+		if action == "upstream" { // 该动作已移除（仅保留 direct/proxy 两种出站）
+			skippedUpstream++
+			continue
+		}
+		if action != "proxy" && action != "direct" {
+			continue
+		}
+		if value == "" && ruleType != "cfip" { // cfip 的 value 只是备注，可为空
+			continue
+		}
+
+		rules = append(rules, customRule{
+			Type:   ruleType,
+			Value:  value,
+			Action: action,
+		})
+	}
+
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("读取规则文件失败: %w", err)
+	}
+
+	if skippedUpstream > 0 {
+		log.Printf("[规则] %s 中 %d 条 upstream 动作规则已跳过（该动作已移除，请改用 direct/proxy）", filePath, skippedUpstream)
+	}
+
+	return rules, nil
+}
+
+// rebuildCustomRulesLocked 重建生效规则列表（调用方需已持有 customRulesMu 写锁）
+func rebuildCustomRulesLocked() {
+	merged := make([]customRule, 0, len(fileRules)+len(panelRules))
+	merged = append(merged, fileRules...)
+	merged = append(merged, panelRules...)
+	customRules = merged
+}
+
+// loadCustomRules 从 -rules 指定的 CSV 文件加载规则（只读桶，面板保存不会覆盖它）
+func loadCustomRules(filePath string) error {
+	rules, err := parseRulesFile(filePath)
+	if err != nil {
+		return err
+	}
+
+	customRulesMu.Lock()
+	fileRules = rules
+	rebuildCustomRulesLocked()
+	total := len(customRules)
+	customRulesMu.Unlock()
+
+	log.Printf("[规则] 已加载文件规则 %d 条 (%s)，生效规则合计 %d 条", len(rules), filePath, total)
+	return nil
+}
+
+// saveCustomRules 保存面板规则到文件（只写面板桶，避免把 -rules CSV 规则抄进 rules.json）
+func saveCustomRules(filePath string) error {
+	customRulesMu.RLock()
+	rules := make([]customRule, len(panelRules))
+	copy(rules, panelRules)
+	customRulesMu.RUnlock()
+
+	// 确保目录存在
+	if dir := filepath.Dir(filePath); dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return fmt.Errorf("创建规则目录失败: %w", err)
+		}
+	}
+
+	file, err := os.Create(filePath)
+	if err != nil {
+		return fmt.Errorf("创建规则文件失败: %w", err)
+	}
+	defer file.Close()
+
+	for _, rule := range rules {
+		fmt.Fprintf(file, "%s,%s,%s\n", rule.Type, rule.Value, rule.Action)
+	}
+
+	return nil
+}
+
+// loadRulesDataFile 从面板规则持久化文件加载规则（可编辑桶，与 -rules CSV 分开存放）
+func loadRulesDataFile() {
+	if rulesData == "" {
+		return
+	}
+	if _, err := os.Stat(rulesData); os.IsNotExist(err) {
+		return
+	}
+	rules, err := parseRulesFile(rulesData)
+	if err != nil {
+		log.Printf("[规则] 加载面板规则失败: %v", err)
+		return
+	}
+
+	customRulesMu.Lock()
+	panelRules = rules
+	rebuildCustomRulesLocked()
+	fileCnt, panelCnt, total := len(fileRules), len(panelRules), len(customRules)
+	customRulesMu.Unlock()
+
+	log.Printf("[规则] 已加载面板规则 %d 条（文件规则 %d 条，生效合计 %d 条）", panelCnt, fileCnt, total)
+}
+
+// ======================== 定时自重启 ========================
+
+// startScheduledRestart 每日定时退出进程（容器无 restart 策略也能自愈），
+// 用于清理长时间运行后的状态劣化（如吞吐劣化、连接悬挂）。时间取容器本地时区（TZ）。
+func startScheduledRestart() {
+	raw := strings.TrimSpace(restartAtRaw)
+	if raw == "" || strings.EqualFold(raw, "off") || raw == "0" || raw == "disabled" {
+		log.Printf("[定时重启] 已关闭（-restart-at / ECH_RESTART_AT = %q）", raw)
+		return
+	}
+	parts := strings.Split(raw, ":")
+	if len(parts) != 2 {
+		log.Printf("[警告] 定时重启时间格式无效 (%q)，已关闭（格式: HH:MM，off=关闭）", raw)
+		return
+	}
+	h, errH := strconv.Atoi(strings.TrimSpace(parts[0]))
+	m, errM := strconv.Atoi(strings.TrimSpace(parts[1]))
+	if errH != nil || errM != nil || h < 0 || h > 23 || m < 0 || m > 59 {
+		log.Printf("[警告] 定时重启时间无效 (%q)，已关闭（格式: HH:MM，off=关闭）", raw)
+		return
+	}
+
+	now := time.Now()
+	next := time.Date(now.Year(), now.Month(), now.Day(), h, m, 0, 0, now.Location())
+	if !next.After(now) {
+		next = next.Add(24 * time.Hour)
+	}
+	log.Printf("[定时重启] 已启用: 每日 %02d:%02d 自动重启，下次 %s", h, m, next.Format("2006-01-02 15:04:05"))
+
+	if d := time.Until(next); d > 0 {
+		time.Sleep(d)
+	}
+
+	log.Printf("[定时重启] 到达 %02d:%02d，正在自我重启刷新进程（不中断容器）...", h, m)
+	// 留出日志落盘/面板可见的时间
+	time.Sleep(500 * time.Millisecond)
+
+	// 进程内 re-exec：同 PID 原地替换镜像，旧状态清零，不依赖容器 restart 策略
+	if exe, err := os.Executable(); err == nil {
+		if err := selfRestart(exe); err != nil {
+			log.Printf("[警告] 定时重启: 自我重启失败（%v），退化为退出进程", err)
+		}
+	} else {
+		log.Printf("[警告] 定时重启: 获取可执行路径失败（%v），退化为退出进程", err)
+	}
+	// 仅 re-exec 失败时走到这里：退出进程（若容器有 restart 策略则由其拉起）
+	time.Sleep(500 * time.Millisecond)
+	os.Exit(0)
+}
+
+// ======================== ECH 后台重试 ========================
+
+// retryECHLoop 后台重试获取 ECH 直到成功（启动时 DoH 不通的自愈，避免容器反复退出）
+func retryECHLoop() {
+	t := time.NewTicker(30 * time.Second)
+	defer t.Stop()
+	for range t.C {
+		if err := refreshECH(); err != nil {
+			log.Printf("[警告] ECH 后台重试失败: %v", err)
+			continue
+		}
+		log.Printf("[启动] ECH 配置后台获取成功")
+		return
+	}
+}
+
+// ======================== Web 管理面板 ========================
+
+var upgrader = websocket.Upgrader{
+	CheckOrigin: func(r *http.Request) bool { return true },
+}
+
+// startWebServer 启动 Web 管理面板
+func startWebServer(addr string) {
+	mux := http.NewServeMux()
+
+	// 登录/登出（不需鉴权）
+	mux.HandleFunc("/login", handleLogin)
+	mux.HandleFunc("/api/login", handleAPILogin)
+	mux.HandleFunc("/api/logout", handleAPILogout)
+
+	// 需要鉴权的路由
+	mux.Handle("/", authMiddleware(http.HandlerFunc(handleIndex)))
+	mux.Handle("/api/status", authMiddleware(http.HandlerFunc(handleStatus)))
+	mux.Handle("/api/config", authMiddleware(http.HandlerFunc(handleConfig)))
+	mux.Handle("/api/rules", authMiddleware(http.HandlerFunc(handleRules)))
+	mux.Handle("/api/connections", authMiddleware(http.HandlerFunc(handleConnections)))
+	mux.Handle("/api/traffic", authMiddleware(http.HandlerFunc(handleTraffic)))
+	mux.Handle("/api/logs", authMiddleware(http.HandlerFunc(handleLogs)))
+	mux.Handle("/api/service/", authMiddleware(http.HandlerFunc(handleService)))
+	mux.Handle("/api/exit-info", authMiddleware(http.HandlerFunc(handleExitInfo)))
+	mux.Handle("/api/cfips", authMiddleware(http.HandlerFunc(handleCFIPs)))
+	mux.Handle("/ws", authMiddleware(http.HandlerFunc(handleWebSocket)))
+
+	log.Printf("[Web] 管理面板启动: http://%s", addr)
+	if err := http.ListenAndServe(addr, mux); err != nil {
+		log.Printf("[Web] 管理面板启动失败: %v", err)
+	}
+}
+
+// authMiddleware 鉴权中间件（webPassword 为空时跳过鉴权）
+func authMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if webPassword == "" {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		// 检查 cookie 中的 session
+		if cookie, err := r.Cookie("ech_session"); err == nil {
+			webSessionsMu.Lock()
+			if exp, ok := webSessions[cookie.Value]; ok && time.Now().Before(exp) {
+				webSessionsMu.Unlock()
+				next.ServeHTTP(w, r)
+				return
+			}
+			delete(webSessions, cookie.Value)
+			webSessionsMu.Unlock()
+		}
+
+		// 未登录，API 返回 401，页面重定向到登录页
+		if strings.HasPrefix(r.URL.Path, "/api/") || r.URL.Path == "/ws" {
+			w.Header().Set("Content-Type", "application/json")
+			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			return
+		}
+		http.Redirect(w, r, "/login", http.StatusFound)
+	})
+}
+
+// handleLogin 提供登录页面
+func handleLogin(w http.ResponseWriter, r *http.Request) {
+	if webPassword == "" {
+		http.Redirect(w, r, "/", http.StatusFound)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write([]byte(loginHTML))
+}
+
+// loginHTML 登录页面
+var loginHTML = `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ECH Proxy - 登录</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#0f1117;color:#e1e4e8;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh}
+.login-box{background:#161b22;border:1px solid #30363d;border-radius:12px;padding:32px;width:360px;box-shadow:0 8px 24px rgba(0,0,0,.4)}
+.login-box h2{text-align:center;margin-bottom:24px;color:#58a6ff;font-size:1.3em}
+.login-box input{width:100%;padding:10px 14px;background:#0d1117;border:1px solid #30363d;border-radius:8px;color:#e1e4e8;font-size:14px;margin-bottom:16px;outline:none}
+.login-box input:focus{border-color:#58a6ff}
+.login-box button{width:100%;padding:10px;background:#238636;color:#fff;border:none;border-radius:8px;font-size:14px;cursor:pointer;font-weight:600}
+.login-box button:hover{background:#2ea043}
+.error{color:#f85149;text-align:center;margin-bottom:12px;font-size:13px;display:none}
+</style>
+</head>
+<body>
+<div class="login-box">
+<h2>ECH Proxy 管理面板</h2>
+<div class="error" id="err"></div>
+<input type="password" id="pw" placeholder="请输入管理密码" autofocus>
+<button onclick="doLogin()">登 录</button>
+</div>
+<script>
+document.getElementById('pw').addEventListener('keydown',e=>{if(e.key==='Enter')doLogin()});
+async function doLogin(){
+const pw=document.getElementById('pw').value;
+const err=document.getElementById('err');
+try{
+const r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:pw})});
+const d=await r.json();
+if(d.status==='ok'){location.href='/'}else{err.textContent=d.error||'密码错误';err.style.display='block'}
+}catch(e){err.textContent='网络错误';err.style.display='block'}
+}
+</script>
+</body>
+</html>`
+
+// handleAPILogin 处理登录请求
+func handleAPILogin(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if r.Method != "POST" {
+		http.Error(w, `{"error":"method not allowed"}`, 405)
+		return
+	}
+	var req struct {
+		Password string `json:"password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		json.NewEncoder(w).Encode(map[string]string{"error": "请求格式错误"})
+		return
+	}
+	if req.Password != webPassword {
+		json.NewEncoder(w).Encode(map[string]string{"error": "密码错误"})
+		return
+	}
+	// 生成 session
+	sessionID := fmt.Sprintf("%d", time.Now().UnixNano())
+	webSessionsMu.Lock()
+	webSessions[sessionID] = time.Now().Add(7 * 24 * time.Hour)
+	webSessionsMu.Unlock()
+
+	http.SetCookie(w, &http.Cookie{
+		Name:     "ech_session",
+		Value:    sessionID,
+		Path:     "/",
+		HttpOnly: true,
+		MaxAge:   7 * 24 * 3600,
+	})
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+// handleAPILogout 退出登录
+func handleAPILogout(w http.ResponseWriter, r *http.Request) {
+	if cookie, err := r.Cookie("ech_session"); err == nil {
+		webSessionsMu.Lock()
+		delete(webSessions, cookie.Value)
+		webSessionsMu.Unlock()
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:   "ech_session",
+		Value:  "",
+		Path:   "/",
+		MaxAge: -1,
+	})
+	http.Redirect(w, r, "/login", http.StatusFound)
+}
+
+// handleIndex 提供 index.html
+func handleIndex(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/" {
+		http.NotFound(w, r)
+		return
+	}
+	data, err := indexHTML.ReadFile("index.html")
+	if err != nil {
+		http.Error(w, "Internal Server Error", 500)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write(data)
+}
+
+// handleStatus 获取系统状态
+func handleStatus(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	customRulesMu.RLock()
+	customRulesCount := len(customRules)
+	customRulesMu.RUnlock()
+	json.NewEncoder(w).Encode(statusResponse{
+		Version:       appVersion,
+		Uptime:        time.Since(startTime).Truncate(time.Second).String(),
+		TotalConns:    totalConns.Load(),
+		ActiveConns:   int(activeConnCnt.Load()),
+		TotalUpload:   totalUpload.Load(),
+		TotalDownload: totalDownload.Load(),
+		RoutingMode:   routingMode,
+		ListenAddr:    listenAddr,
+		ServerAddr:    serverAddr,
+		ECHDomain:     echDomain,
+		WebAddr:       webAddr,
+		CustomRules:   customRulesCount,
+		MemoryMB:      float64(m.Alloc) / 1024 / 1024,
+	})
+}
+
+// handleConfig 获取/更新配置
+func handleConfig(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	if r.Method == "GET" {
+		config := map[string]interface{}{
+			"listen_addr":  listenAddr,
+			"server_addr":  serverAddr,
+			"server_ip":    serverIP,
+			"token":        token,
+			"dns_server":   dnsServer,
+			"ech_domain":   echDomain,
+			"routing_mode": routingMode,
+			"web_addr":     webAddr,
+			"rules_file":   rulesFile,
+			"web_password": webPassword,
+		}
+		json.NewEncoder(w).Encode(config)
+		return
+	}
+
+	// POST: 更新配置
+	var update map[string]string
+	if err := json.NewDecoder(r.Body).Decode(&update); err != nil {
+		http.Error(w, `{"error":"invalid json"}`, 400)
+		return
+	}
+
+	// 校验地址类字段：非法值直接拒绝，避免写坏配置导致面板/代理无法启动
+	if v, ok := update["listen_addr"]; ok && v != "" && !validHostPort(v) {
+		json.NewEncoder(w).Encode(map[string]string{"error": "listen_addr 非法，需要 host:port 格式，例如 0.0.0.0:30000"})
+		return
+	}
+	if v, ok := update["server_addr"]; ok && v != "" && !validHostPort(v) {
+		json.NewEncoder(w).Encode(map[string]string{"error": "server_addr 非法，需要 host:port 格式，例如 xxx.workers.dev:443"})
+		return
+	}
+	// 面板地址宽容：纯端口输入（如 30001）先归一化成 :30001 再校验
+	if v, ok := update["web_addr"]; ok {
+		update["web_addr"] = normalizeWebAddr(v)
+	}
+	if v, ok := update["web_addr"]; ok && v != "" && !validHostPort(v) {
+		json.NewEncoder(w).Encode(map[string]string{"error": "web_addr 非法，可填端口（如 30001）或 host:port（如 0.0.0.0:30001）"})
+		return
+	}
+	if v, ok := update["dns_server"]; ok && v == "" {
+		json.NewEncoder(w).Encode(map[string]string{"error": "dns_server 不能为空"})
+		return
+	}
+	if v, ok := update["ech_domain"]; ok && v == "" {
+		json.NewEncoder(w).Encode(map[string]string{"error": "ech_domain 不能为空"})
+		return
+	}
+
+	if v, ok := update["listen_addr"]; ok && v != "" {
+		listenAddr = v
+	}
+	if v, ok := update["server_addr"]; ok && v != "" {
+		serverAddr = v
+	}
+	if v, ok := update["server_ip"]; ok {
+		serverIP = v
+	}
+	if v, ok := update["token"]; ok && v != "" {
+		token = v
+	}
+	if v, ok := update["dns_server"]; ok && v != "" {
+		dnsServer = v
+	}
+	if v, ok := update["ech_domain"]; ok && v != "" {
+		echDomain = v
+	}
+	if v, ok := update["web_password"]; ok {
+		webPassword = v
+		log.Printf("[配置] 面板密码已更新")
+	}
+	if v, ok := update["routing_mode"]; ok && v != "" {
+		switch v {
+		case "global", "bypass_cn", "none", "custom":
+			routingMode = v
+			log.Printf("[配置] 分流模式已更新: %s", routingMode)
+		}
+	}
+	if v, ok := update["web_addr"]; ok && v != "" {
+		webAddr = v
+	}
+
+	// 刷新 ECH
+	if err := refreshECH(); err != nil {
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+
+	// 保存配置到文件
+	if err := saveConfig(configFile); err != nil {
+		log.Printf("[配置] 保存配置文件失败: %v", err)
+	} else {
+		log.Printf("[配置] 配置已保存到: %s", configFile)
+	}
+
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+// handleRules 获取/更新自定义规则
+func handleRules(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	if r.Method == "GET" {
+		// 只返回面板桶：-rules CSV 属于只读配置，面板改不到它（规则源分离）
+		customRulesMu.RLock()
+		rules := make([]customRule, len(panelRules))
+		copy(rules, panelRules)
+		customRulesMu.RUnlock()
+		json.NewEncoder(w).Encode(rules)
+		return
+	}
+
+	// POST: 替换面板规则
+	var rules []customRule
+	if err := json.NewDecoder(r.Body).Decode(&rules); err != nil {
+		http.Error(w, `{"error":"invalid json"}`, 400)
+		return
+	}
+	// 逐条校验，拒绝脏数据（否则坏规则会静默落盘且永远匹配不上）
+	for i, rule := range rules {
+		rule.Value = strings.TrimSpace(rule.Value)
+		switch rule.Type {
+		case "domain", "keyword":
+			if rule.Value == "" {
+				http.Error(w, fmt.Sprintf(`{"error":"第 %d 条规则值为空"}`, i+1), 400)
+				return
+			}
+		case "ipcidr":
+			if _, _, err := net.ParseCIDR(rule.Value); err != nil {
+				http.Error(w, fmt.Sprintf(`{"error":"第 %d 条 ipcidr 格式无效: %s"}`, i+1, rule.Value), 400)
+				return
+			}
+		case "cfip":
+			// value 只是备注（匹配只看内置 CF 段），允许任意文本
+		default:
+			http.Error(w, fmt.Sprintf(`{"error":"第 %d 条类型无效: %s"}`, i+1, rule.Type), 400)
+			return
+		}
+		if rule.Action != "proxy" && rule.Action != "direct" {
+			http.Error(w, fmt.Sprintf(`{"error":"第 %d 条动作无效: %s（仅支持 proxy/direct）"}`, i+1, rule.Action), 400)
+			return
+		}
+		rules[i].Value = rule.Value
+	}
+
+	customRulesMu.Lock()
+	panelRules = rules
+	rebuildCustomRulesLocked()
+	total := len(customRules)
+	customRulesMu.Unlock()
+
+	// 持久化到文件
+	if err := saveCustomRules(rulesData); err != nil {
+		log.Printf("[规则] 保存规则失败: %v", err)
+	} else {
+		log.Printf("[规则] 已保存 %d 条面板规则到 %s（生效合计 %d 条）", len(rules), rulesData, total)
+	}
+
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+// handleCFIPs 管理生效 CF 网段：GET 返回内置快照/增减量/生效集；POST 更新增减量并持久化
+func handleCFIPs(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if r.Method == "GET" {
+		cfEffectiveMu.RLock()
+		eff := cfStrs(cfEffectiveNets)
+		if eff == nil {
+			eff = cfStrs(cfIPNets)
+		}
+		cfEffectiveMu.RUnlock()
+		add := append([]string{}, cfipAdd...)
+		del := append([]string{}, cfipDel...)
+		if add == nil {
+			add = []string{}
+		}
+		if del == nil {
+			del = []string{}
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"builtin":   cfStrs(cfIPNets),
+			"add":       add,
+			"del":       del,
+			"effective": eff,
+		})
+		return
+	}
+	if r.Method != "POST" {
+		http.Error(w, `{"error":"method not allowed"}`, 405)
+		return
+	}
+	var body struct {
+		Add []string `json:"add"`
+		Del []string `json:"del"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, `{"error":"invalid json"}`, 400)
+		return
+	}
+	norm := func(list []string) ([]string, error) {
+		seen := map[string]bool{}
+		out := []string{}
+		for _, c := range list {
+			_, n, err := net.ParseCIDR(strings.TrimSpace(c))
+			if err != nil {
+				return nil, fmt.Errorf("网段格式无效: %s", c)
+			}
+			if !seen[n.String()] {
+				seen[n.String()] = true
+				out = append(out, n.String())
+			}
+		}
+		return out, nil
+	}
+	add, err := norm(body.Add)
+	if err != nil {
+		http.Error(w, `{"error":"`+err.Error()+`"}`, 400)
+		return
+	}
+	del, err := norm(body.Del)
+	if err != nil {
+		http.Error(w, `{"error":"`+err.Error()+`"}`, 400)
+		return
+	}
+	builtin := map[string]bool{}
+	for _, n := range cfIPNets {
+		builtin[n.String()] = true
+	}
+	for _, c := range del {
+		if !builtin[c] {
+			http.Error(w, `{"error":"只能删除内置快照中的网段: `+c+`"}`, 400)
+			return
+		}
+	}
+	cfipAdd, cfipDel = add, del
+	rebuildCFNets()
+	if err := saveConfig(configFile); err != nil {
+		log.Printf("[规则] 保存 CF 增减量失败: %v", err)
+	}
+	cfEffectiveMu.RLock()
+	eff := cfStrs(cfEffectiveNets)
+	cfEffectiveMu.RUnlock()
+	json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok", "effective": eff})
+}
+
+// handleConnections 获取活跃连接（支持搜索和排序）
+func handleConnections(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	conns := getActiveConns()
+
+	// 搜索过滤
+	search := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("search")))
+	if search != "" {
+		var filtered []connInfoResp
+		for _, c := range conns {
+			if strings.Contains(strings.ToLower(c.ID), search) ||
+				strings.Contains(strings.ToLower(c.Source), search) ||
+				strings.Contains(strings.ToLower(c.Target), search) ||
+				strings.Contains(strings.ToLower(c.Mode), search) ||
+				strings.Contains(strings.ToLower(c.Rule), search) ||
+				strings.Contains(strings.ToLower(c.Matched), search) {
+				filtered = append(filtered, c)
+			}
+		}
+		conns = filtered
+	}
+
+	// 排序
+	sortBy := r.URL.Query().Get("sort")
+	sortOrder := r.URL.Query().Get("order") // "asc" or "desc", default asc
+	if sortBy != "" {
+		desc := sortOrder == "desc"
+		sort.Slice(conns, func(i, j int) bool {
+			var less bool
+			switch sortBy {
+			case "id":
+				less = conns[i].ID < conns[j].ID
+			case "source":
+				less = conns[i].Source < conns[j].Source
+			case "target":
+				less = conns[i].Target < conns[j].Target
+			case "mode":
+				less = conns[i].Mode < conns[j].Mode
+			case "rule":
+				less = conns[i].Rule < conns[j].Rule
+			case "upload":
+				less = conns[i].Upload < conns[j].Upload
+			case "download":
+				less = conns[i].Download < conns[j].Download
+			case "start_time":
+				less = conns[i].StartTime.Before(conns[j].StartTime)
+			default:
+				less = conns[i].StartTime.Before(conns[j].StartTime)
+			}
+			if desc {
+				return !less
+			}
+			return less
+		})
+	}
+
+	json.NewEncoder(w).Encode(conns)
+}
+
+// handleTraffic 获取流量统计
+func handleTraffic(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"total_upload":   totalUpload.Load(),
+		"total_download": totalDownload.Load(),
+		"total_conns":    totalConns.Load(),
+		"uptime":         time.Since(startTime).Seconds(),
+	})
+}
+
+// handleLogs 获取日志
+func handleLogs(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	logBufferMu.Lock()
+	logs := make([]logEntry, len(logBuffer))
+	copy(logs, logBuffer)
+	logBufferMu.Unlock()
+
+	// 返回最新的日志 (倒序)
+	sort.Slice(logs, func(i, j int) bool {
+		return i > j
+	})
+
+	limit := 100
+	if len(logs) < limit {
+		limit = len(logs)
+	}
+	json.NewEncoder(w).Encode(logs[:limit])
+}
+
+// handleService 服务控制
+func handleService(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	action := strings.TrimPrefix(r.URL.Path, "/api/service/")
+
+	switch action {
+	case "refresh-ech":
+		if err := refreshECH(); err != nil {
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]string{"status": "ok", "message": "ECH 配置已刷新"})
+	case "reload-rules":
+		if rulesFile == "" {
+			json.NewEncoder(w).Encode(map[string]string{"error": "未配置规则文件"})
+			return
+		}
+		if err := loadCustomRules(rulesFile); err != nil {
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]string{"status": "ok", "message": "规则已重载"})
+	default:
+		json.NewEncoder(w).Encode(map[string]string{"error": "unknown action"})
+	}
+}
+
+// ======================== 出口IP检测 ========================
+
+var (
+	cachedExitIP  string
+	cachedCOLO    string
+	exitInfoAt    time.Time
+	exitInfoMu    sync.RWMutex
+	exitDetecting atomic.Bool
+)
+
+// exitInfoTTL 出口信息缓存有效期：只在概览页按需检测，平时不产生探测连接
+const exitInfoTTL = 10 * time.Minute
+
+// startExitInfoDetector 仅启动后探测一次供首屏展示；之后只在查看概览页（/api/exit-info）时按需检测
+func startExitInfoDetector() {
+	go func() {
+		time.Sleep(5 * time.Second)
+		detectExitInfo()
+	}()
+}
+
+// triggerExitDetect 触发一次后台检测（防并发：检测中直接返回）
+func triggerExitDetect() {
+	if exitDetecting.CompareAndSwap(false, true) {
+		go func() {
+			defer exitDetecting.Store(false)
+			detectExitInfo()
+		}()
+	}
+}
+
+// detectExitInfo 通过本地代理检测出口 IP 与 Cloudflare COLO
+func detectExitInfo() {
+	log.Printf("[检测] === 开始检测出口IP ===")
+
+	// 通过本地 HTTP 代理检测出口 IP（避免 Worker 不支持 80 端口的问题）
+	localProxy := "http://127.0.0.1" + listenAddr[strings.Index(listenAddr, ":"):]
+	proxyURL, _ := url.Parse(localProxy)
+
+	client := &http.Client{
+		Timeout: 10 * time.Second,
+		Transport: &http.Transport{
+			Proxy: http.ProxyURL(proxyURL),
+		},
+	}
+
+	// 检测出口 IP（多源轮询，任一成功即可）
+	exitIP := ""
+	ipSources := []string{
+		"https://api.ipify.org?format=json",
+		"https://ifconfig.me/ip",
+		"https://api.ip.sb/ip",
+	}
+	for _, src := range ipSources {
+		if ip := fetchExitIP(client, src); ip != "" {
+			exitIP = ip
+			break
+		}
+	}
+	if exitIP == "" {
+		log.Printf("[检测] 获取出口IP失败（已试 %d 个源）", len(ipSources))
+	}
+
+	// 检测 COLO（多源 Cloudflare trace，任一成功即可）
+	colo := ""
+	coloSources := []string{
+		"https://1.1.1.1/cdn-cgi/trace",
+		"https://www.cloudflare.com/cdn-cgi/trace",
+		"https://cloudflare.com/cdn-cgi/trace",
+	}
+	for _, src := range coloSources {
+		if c := fetchCOLO(client, src); c != "" {
+			colo = c
+			break
+		}
+	}
+
+	// 只在成功时更新缓存：失败不擦除上次的结果
+	exitInfoMu.Lock()
+	if exitIP != "" {
+		cachedExitIP = exitIP
+	}
+	if colo != "" {
+		cachedCOLO = colo
+	}
+	if exitIP != "" || colo != "" {
+		exitInfoAt = time.Now()
+	}
+	exitInfoMu.Unlock()
+
+	if exitIP != "" {
+		log.Printf("[检测] 出口IP: %s, COLO: %s", exitIP, colo)
+	}
+}
+
+// fetchExitIP 从单个源获取出口 IP（JSON 或纯文本），失败返回 ""
+func fetchExitIP(client *http.Client, url string) string {
+	resp, err := client.Get(url)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return ""
+	}
+	body, _ := io.ReadAll(resp.Body)
+	// 先按 JSON 解析（ipify），失败则按纯文本处理，结果必须是合法 IP
+	var ipResp struct {
+		IP string `json:"ip"`
+	}
+	if json.Unmarshal(body, &ipResp) == nil && net.ParseIP(strings.TrimSpace(ipResp.IP)) != nil {
+		return strings.TrimSpace(ipResp.IP)
+	}
+	if ip := net.ParseIP(strings.TrimSpace(string(body))); ip != nil {
+		return ip.String()
+	}
+	return ""
+}
+
+// fetchCOLO 从单个 Cloudflare trace 源解析 colo，失败返回 ""
+func fetchCOLO(client *http.Client, url string) string {
+	resp, err := client.Get(url)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return ""
+	}
+	body, _ := io.ReadAll(resp.Body)
+	traceStr := string(body)
+	if idx := strings.Index(traceStr, "colo="); idx >= 0 {
+		start := idx + 5
+		end := start
+		for end < len(traceStr) && traceStr[end] != '\r' && traceStr[end] != '\n' {
+			end++
+		}
+		return traceStr[start:end]
+	}
+	return ""
+}
+
+// handleExitInfo 返回缓存的出口信息；缓存过期或 ?refresh=1 时触发一次后台检测
+func handleExitInfo(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if r.URL.Query().Get("refresh") == "1" {
+		triggerExitDetect()
+	}
+	exitInfoMu.RLock()
+	ip, colo, at := cachedExitIP, cachedCOLO, exitInfoAt
+	exitInfoMu.RUnlock()
+	stale := at.IsZero() || time.Since(at) > exitInfoTTL
+	if stale {
+		triggerExitDetect()
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"exit_ip":    ip,
+		"colo":       colo,
+		"updated_at": at.Unix(),
+		"stale":      stale,
+	})
+}
+
+// ======================== WebSocket 实时推送 ========================
+
+func handleWebSocket(w http.ResponseWriter, r *http.Request) {
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Printf("[Web] WebSocket 升级失败: %v", err)
+		return
+	}
+	defer conn.Close()
+
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	// 用于计算实时速度（单位 B/s）
+	var prevUp, prevDn int64
+	var prevTime time.Time
+	firstTick := true
+
+	for {
+		select {
+		case <-ticker.C:
+			// 计算实时流量（活跃连接的流量之和）
+			var rtUp, rtDn int64
+			activeConns.Range(func(key, value interface{}) bool {
+				info := value.(*connInfo)
+				rtUp += info.upload.Load()
+				rtDn += info.download.Load()
+				return true
+			})
+
+			// 计算增量速度（总上传/下载 - 上次值）/ 实际间隔秒数
+			curUp := totalUpload.Load() + rtUp
+			curDn := totalDownload.Load() + rtDn
+			now := time.Now()
+			speedUp := int64(0)
+			speedDn := int64(0)
+			if !firstTick {
+				dt := now.Sub(prevTime).Seconds()
+				if dt > 0 {
+					speedUp = int64(float64(curUp-prevUp) / dt)
+					speedDn = int64(float64(curDn-prevDn) / dt)
+					if speedUp < 0 {
+						speedUp = 0
+					}
+					if speedDn < 0 {
+						speedDn = 0
+					}
+				}
+			}
+			firstTick = false
+			prevUp = curUp
+			prevDn = curDn
+			prevTime = now
+
+			var m runtime.MemStats
+			runtime.ReadMemStats(&m)
+			data := map[string]interface{}{
+				"active_conns":   activeConnCnt.Load(),
+				"total_upload":   curUp,
+				"total_download": curDn,
+				"rt_upload":      speedUp,
+				"rt_download":    speedDn,
+				"uptime":         time.Since(startTime).Seconds(),
+				"memory_mb":      float64(m.Alloc) / 1024 / 1024,
+			}
+			if err := conn.WriteJSON(data); err != nil {
+				return
+			}
+		case <-r.Context().Done():
+			return
+		}
+	}
 }

@@ -27,6 +27,47 @@ jobs:
       - name: go vet
         run: go vet ./...
 
+  build-linux:
+    needs: vet
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    strategy:
+      matrix:
+        include:
+          - goarch: amd64
+            suffix: amd64
+          - goarch: arm64
+            suffix: arm64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build linux binary + bundle
+        env:
+          GOOS: linux
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          mkdir -p dist/pkg
+          go build -trimpath -ldflags "-s -w" -o dist/pkg/ech-workers .
+          cp chn_ip.txt chn_ip_v6.txt _worker.js README.md config.example.json dist/pkg/
+          tar -czf dist/ech-workers-linux-${{ matrix.suffix }}.tar.gz -C dist/pkg .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ech-workers-linux-${{ matrix.suffix }}
+          path: dist/ech-workers-linux-${{ matrix.suffix }}.tar.gz
+          if-no-files-found: error
+
   build-and-push:
     needs: vet
     runs-on: ubuntu-latest
@@ -52,7 +93,7 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
             type=raw,value=latest
-            type=raw,value=1.3
+            type=raw,value=1.4
             type=sha,prefix=
 
       - name: Build and push

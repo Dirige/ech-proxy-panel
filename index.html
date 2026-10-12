@@ -221,8 +221,7 @@ select.theme-select:focus{outline:none;border-color:var(--cyan)}
 .tag::before{content:'';width:5px;height:5px;border-radius:50%}
 .tag.proxy{background:rgba(34,211,238,0.12);color:var(--cyan)}.tag.proxy::before{background:var(--cyan)}
 .tag.direct{background:rgba(52,211,153,0.12);color:var(--green)}.tag.direct::before{background:var(--green)}
-.tag.upstream{background:rgba(167,139,250,0.12);color:var(--violet)}.tag.upstream::before{background:var(--violet)}
-.tag.clash{background:rgba(251,191,36,0.12);color:var(--orange)}.tag.clash::before{background:var(--orange)}
+.tag.custom{background:rgba(167,139,250,0.12);color:var(--violet)}.tag.custom::before{background:var(--violet)}
 .tag.sock{background:rgba(167,139,250,0.12);color:var(--violet)}.tag.sock::before{background:var(--violet)}
 .tag.http{background:rgba(251,191,36,0.12);color:var(--orange)}.tag.http::before{background:var(--orange)}
 
@@ -320,6 +319,14 @@ select.theme-select:focus{outline:none;border-color:var(--cyan)}
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4"/></svg>
       <span>连接</span>
     </div>
+    <div class="nav-item" data-page="logs">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M4 6h16M4 12h16M4 18h10"/><path d="M14 18l2 2 4-4"/></svg>
+      <span>日志</span>
+    </div>
+    <div class="nav-item" data-page="traffic">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M3 17l6-6 4 4 8-8"/><path d="M14 7h7v7"/></svg>
+      <span>流量</span>
+    </div>
     <div class="nav-item" data-page="rules">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
       <span>规则</span>
@@ -332,7 +339,7 @@ select.theme-select:focus{outline:none;border-color:var(--cyan)}
   <div class="sidebar-footer">
     <span class="status-dot"></span>
     <span>运行中</span>
-    <span class="mono" id="app-version" style="opacity:.55" title="面板版本">v1.3</span>
+    <span class="mono" id="app-version" style="opacity:.55" title="面板版本">v1.4</span>
   </div>
 </div>
 
@@ -381,13 +388,6 @@ select.theme-select:focus{outline:none;border-color:var(--cyan)}
       </button>
       <button class="btn" onclick="detectExitInfo(true)">重新检测出口</button>
     </div>
-
-    <div class="panel">
-      <div class="panel-header"><span class="panel-title">实时日志</span></div>
-      <div class="panel-body" style="padding:0">
-        <div class="log-area" id="ov-logs" style="border:none;border-radius:0"><div class="empty">暂无日志</div></div>
-      </div>
-    </div>
   </div>
 
   <!-- 连接 -->
@@ -434,6 +434,54 @@ select.theme-select:focus{outline:none;border-color:var(--cyan)}
     </div>
   </div>
 
+  <!-- 日志 -->
+  <div class="page" id="page-logs">
+    <div class="page-header">
+      <h1 class="page-title">运行<span class="accent">日志</span></h1>
+      <div class="actions" style="margin:0">
+        <select id="log-filter" class="theme-select" onchange="renderLogs()">
+          <option value="">全部级别</option>
+          <option value="warn">警告及以上</option>
+          <option value="error">仅错误</option>
+        </select>
+        <button class="btn" onclick="loadLogs()">刷新</button>
+        <button class="btn" onclick="clearLogView()">清空显示</button>
+      </div>
+    </div>
+    <div class="panel">
+      <div class="panel-header"><span class="panel-title">实时日志（最近 200 条，3 秒自动刷新）</span></div>
+      <div class="panel-body" style="padding:0">
+        <div class="log-area" id="logs-view" style="border:none;border-radius:0;max-height:calc(100vh - 250px)"><div class="empty">暂无日志</div></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 流量 -->
+  <div class="page" id="page-traffic">
+    <div class="page-header">
+      <h1 class="page-title">实时<span class="accent">流量</span></h1>
+      <div class="actions" style="margin:0">
+        <button class="btn" onclick="loadTraffic()">刷新</button>
+      </div>
+    </div>
+    <div class="cards">
+      <div class="card"><div class="card-label">↑ 实时上传</div><div class="card-value orange" id="tf-speed-up">0 B/s</div></div>
+      <div class="card"><div class="card-label">↓ 实时下载</div><div class="card-value violet" id="tf-speed-down">0 B/s</div></div>
+      <div class="card"><div class="card-label">↑ 上传总量</div><div class="card-value orange" id="tf-total-up">0 B</div></div>
+      <div class="card"><div class="card-label">↓ 下载总量</div><div class="card-value violet" id="tf-total-down">0 B</div></div>
+      <div class="card"><div class="card-label">● 活动连接</div><div class="card-value green" id="tf-active">0</div></div>
+      <div class="card"><div class="card-label">◷ 运行时长</div><div class="card-value cyan" id="tf-uptime">0s</div></div>
+    </div>
+    <div class="panel">
+      <div class="panel-header"><span class="panel-title">↑ 上传速度趋势（每 2 秒采样，约 5 分钟）</span></div>
+      <div class="panel-body"><canvas id="tf-chart-up" height="90" style="width:100%;display:block"></canvas></div>
+    </div>
+    <div class="panel">
+      <div class="panel-header"><span class="panel-title">↓ 下载速度趋势（每 2 秒采样，约 5 分钟）</span></div>
+      <div class="panel-body"><canvas id="tf-chart-down" height="90" style="width:100%;display:block"></canvas></div>
+    </div>
+  </div>
+
   <!-- 规则 -->
   <div class="page" id="page-rules">
     <div class="page-header">
@@ -471,19 +519,6 @@ select.theme-select:focus{outline:none;border-color:var(--cyan)}
           </table>
         </div>
       </div>
-      <div class="rules-col">
-        <h3><span class="dot" style="background:var(--violet)"></span>上游域名</h3>
-        <div class="domain-input">
-          <input id="upstream-input" placeholder="输入域名，如 openai.com" onkeydown="if(event.key==='Enter')addDomain('upstream')">
-          <button class="btn btn-sm btn-primary" onclick="addDomain('upstream')">添加</button>
-        </div>
-        <div class="table-wrap" style="box-shadow:none">
-          <table class="table">
-            <thead><tr><th>域名</th><th style="width:50px"></th></tr></thead>
-            <tbody id="upstream-table"></tbody>
-          </table>
-        </div>
-      </div>
     </div>
     <div class="rules-col" style="margin-top:16px">
       <h3><span class="dot" style="background:var(--orange)"></span>IP 段 / CF IP 段 / 关键词规则</h3>
@@ -497,7 +532,6 @@ select.theme-select:focus{outline:none;border-color:var(--cyan)}
         <select id="other-action" class="theme-select">
           <option value="direct">直连</option>
           <option value="proxy">代理</option>
-          <option value="upstream">上游代理</option>
         </select>
         <button class="btn btn-sm btn-primary" onclick="addOtherRule()">添加</button>
       </div>
@@ -507,7 +541,7 @@ select.theme-select:focus{outline:none;border-color:var(--cyan)}
           <tbody id="other-table"></tbody>
         </table>
       </div>
-      <div class="hint" style="margin-top:8px">域名规则在上表三列编辑；IP 段规则对解析后的域名同样生效（按规则顺序匹配）；CF IP 段按下表生效集匹配（value 仅备注）。动作"上游代理"把流量交给 <code>-upstream</code>（Clash 等），拨不通自动回退 ECH。仅"面板规则"可在此编辑，<code>-rules</code> 启动参数加载的规则需改文件后重启。</div>
+      <div class="hint" style="margin-top:8px">域名规则在上表两列编辑；IP 段规则对解析后的域名同样生效（按规则顺序匹配）；CF IP 段按下表生效集匹配（value 仅备注）。规则动作仅"直连"与"代理"两种出站，优先于分流模式。仅"面板规则"可在此编辑，<code>-rules</code> 启动参数加载的规则需改文件后重启。</div>
     </div>
     <div class="rules-col" style="margin-top:16px">
       <h3><span class="dot" style="background:var(--violet)"></span>CF IP 段管理（内置快照 ± 自定义）</h3>
@@ -548,11 +582,6 @@ select.theme-select:focus{outline:none;border-color:var(--cyan)}
           <option value="custom">自定义规则</option>
         </select>
       </div>
-      <div class="config-item">
-        <label>固定出口 IP</label>
-        <input id="cfg-proxyip" placeholder="留空 = 自动就近分配">
-        <div class="hint">如 101.79.165.113 或 101.79.165.113:443</div>
-      </div>
       <div class="config-item"><label>DoH 服务器</label><input id="cfg-dns"></div>
       <div class="config-item"><label>ECH 域名</label><input id="cfg-ech"></div>
       <div class="config-item">
@@ -561,28 +590,6 @@ select.theme-select:focus{outline:none;border-color:var(--cyan)}
         <div class="hint">可只填端口；端口改动需重启面板/容器生效</div>
       </div>
       <div class="config-item"><label>面板密码</label><input id="cfg-password" type="password" placeholder="留空 = 无需登录"></div>
-      <div class="config-item">
-        <label>兜底上游（SOCKS5 / HTTP）</label>
-        <input id="cfg-upstream" placeholder="如 127.0.0.1:7890，留空 = 不兜底">
-        <div class="hint">ECH 失败时改走该地址；规则里动作选「上游代理」的域名也走这里</div>
-      </div>
-      <div class="config-item">
-        <label>失败兜底开关</label>
-        <select id="cfg-fallback">
-          <option value="on">开</option>
-          <option value="off">关</option>
-        </select>
-      </div>
-      <div class="config-item">
-        <label>老化流量阈值</label>
-        <input id="cfg-recycle-bytes" placeholder="如 150m，0 = 关闭">
-        <div class="hint">单隧道搬满即主动断开，播放器自动重连换新隧道（CF 免费节点越用越慢的自愈），保存即生效</div>
-      </div>
-      <div class="config-item">
-        <label>老化时长阈值</label>
-        <input id="cfg-recycle-duration" placeholder="如 15m，0 = 关闭">
-        <div class="hint">单隧道最长存活时间，到点换新，保存即生效</div>
-      </div>
     </div>
   </div>
 </div>
@@ -600,6 +607,42 @@ let connSortBy='start_time',connSortOrder='desc';
 // 规则页状态（顶层 let 必须在 switchPage(savedPage) 之前完成初始化，否则 TDZ 报错中断脚本）
 let ruleList = [];
 let rulesDirty = false;
+
+// ===== 日志页 =====
+let logList=[],logsTimer=null;
+async function loadLogs(){try{const logs=await api('/api/logs');logList=logs||[]}catch(e){}renderLogs()}
+function renderLogs(){
+  const f=document.getElementById('log-filter').value;let list=logList;
+  if(f==='warn')list=list.filter(l=>l.level==='warn'||l.level==='error');
+  else if(f==='error')list=list.filter(l=>l.level==='error');
+  const el=document.getElementById('logs-view');
+  if(!list||list.length===0){el.innerHTML='<div class="empty">暂无日志</div>';return}
+  el.innerHTML=list.map(l=>{const cls=l.level==='error'?'level-error':l.level==='warn'?'level-warn':'level-info';return`<div class="log-line"><span class="time">${escHtml(l.time)}</span> <span class="${cls}">[${escHtml(l.level)}]</span> ${escHtml(l.msg)}</div>`}).join('');
+  el.scrollTop=el.scrollHeight;
+}
+function clearLogView(){logList=[];renderLogs()}
+function startLogsRefresh(){stopLogsRefresh();loadLogs();logsTimer=setInterval(loadLogs,3000)}
+function stopLogsRefresh(){if(logsTimer){clearInterval(logsTimer);logsTimer=null}}
+
+// ===== 流量页 =====
+const tfHist={up:[],dn:[]},TF_MAX=150;
+function pushTrafficSample(up,dn){tfHist.up.push(up||0);tfHist.dn.push(dn||0);if(tfHist.up.length>TF_MAX){tfHist.up.shift();tfHist.dn.shift()}if(document.getElementById('page-traffic').classList.contains('active'))drawTfCharts()}
+function fmtUptime(s){s=Math.floor(s||0);const h=Math.floor(s/3600),m=Math.floor(s%3600/60),ss=s%60;return(h?h+'h ':'')+(h||m?m+'m ':'')+ss+'s'}
+async function loadTraffic(){try{const t=await api('/api/traffic');document.getElementById('tf-total-up').textContent=fmtBytes(t.total_upload||0);document.getElementById('tf-total-down').textContent=fmtBytes(t.total_download||0);document.getElementById('tf-uptime').textContent=fmtUptime(t.uptime)}catch(e){}drawTfCharts()}
+function drawTf(id,data,color){
+  const cv=document.getElementById(id);if(!cv)return;
+  const w=cv.clientWidth||600,h=90,dpr=window.devicePixelRatio||1;
+  cv.width=w*dpr;cv.height=h*dpr;
+  const ctx=cv.getContext('2d');ctx.scale(dpr,dpr);ctx.clearRect(0,0,w,h);
+  const n=data.length;if(n<1)return;
+  const max=Math.max.apply(null,data.concat([1]));
+  ctx.beginPath();
+  data.forEach((v,i)=>{const x=n>1?(i/(n-1))*w:0,y=h-3-(v/max)*(h-10);i?ctx.lineTo(x,y):ctx.moveTo(x,y)});
+  ctx.strokeStyle=color;ctx.lineWidth=1.5;ctx.stroke();
+  ctx.lineTo(w,h);ctx.lineTo(0,h);ctx.closePath();ctx.fillStyle=color+'22';ctx.fill();
+}
+function drawTfCharts(){drawTf('tf-chart-up',tfHist.up,'#fbbf24');drawTf('tf-chart-down',tfHist.dn,'#a78bfa')}
+
 function startConnRefresh(){
   stopConnRefresh();
   if(connPaused) return;
@@ -637,7 +680,7 @@ function switchPage(pg){
   localStorage.setItem('ech_page',pg);
   if(pg==='overview')loadOverview();
   else if(pg==='connections'){loadConnections();startConnRefresh()}
-  else{stopConnRefresh();if(pg==='rules'){loadRules();loadCFIPs()}else if(pg==='config')loadConfig()}
+  else{stopConnRefresh();stopLogsRefresh();if(pg==='rules'){loadRules();loadCFIPs()}else if(pg==='config')loadConfig();else if(pg==='logs')startLogsRefresh();else if(pg==='traffic')loadTraffic()}
 }
 document.querySelectorAll('.nav-item').forEach(el=>el.addEventListener('click',()=>switchPage(el.dataset.page)));
 
@@ -646,7 +689,7 @@ switchPage(savedPage);
 
 function fmtBytes(b){if(b===0)return '0 B';const k=1024;const u=['B','KB','MB','GB','TB'];const i=Math.floor(Math.log(b)/Math.log(k));return(b/Math.pow(k,i)).toFixed(i>0?2:0)+' '+u[i]}
 function fmtSpeed(bps){if(bps===0)return '0 B/s';const k=1024;const u=['B/s','KB/s','MB/s','GB/s'];const i=Math.floor(Math.log(bps)/Math.log(k));return(bps/Math.pow(k,i)).toFixed(i>0?2:0)+' '+u[i]}
-async function api(path,opts){const r=await fetch(path,opts);return r.json()}
+async function api(path,opts){const r=await fetch(path,opts);if(r.status===401){location.href='/login';return new Promise(()=>{})}return r.json()}
 function escHtml(s){const d=document.createElement('div');d.textContent=s;return d.innerHTML}
 
 // 实时速度由后端通过 WebSocket 推送（rt_upload/rt_download，单位 B/s），前端直接显示
@@ -666,15 +709,12 @@ async function checkPing(){
 
 async function loadOverview(){
   try{
-    const [status,logs]=await Promise.all([api('/api/status'),api('/api/logs')]);
+    const status=await api('/api/status');
     document.getElementById('ov-active').textContent=status.active_conns;
     document.getElementById('ov-total-up').textContent=fmtBytes(status.total_upload);
     document.getElementById('ov-total-down').textContent=fmtBytes(status.total_download);
     document.getElementById('ov-mem').textContent=(status.memory_mb||0).toFixed(1)+' MB';
-    const ver=document.getElementById('app-version');if(ver)ver.textContent='v'+(status.version||'1.3');
-    const logEl=document.getElementById('ov-logs');
-    if(!logs||logs.length===0){logEl.innerHTML='<div class="empty">暂无日志</div>'}
-    else{logEl.innerHTML=logs.map(l=>{const cls=l.level==='error'?'level-error':l.level==='warn'?'level-warn':'level-info';return`<div class="log-line"><span class="time">${escHtml(l.time)}</span> <span class="${cls}">[${escHtml(l.level)}]</span> ${escHtml(l.msg)}</div>`}).join('');logEl.scrollTop=logEl.scrollHeight}
+    const ver=document.getElementById('app-version');if(ver)ver.textContent='v'+(status.version||'1.4');
     detectIP();detectExitInfo();checkPing();
   }catch(e){if(e&&e.message==='未登录')return}
 }
@@ -689,13 +729,13 @@ async function loadConnections(){
   const conns=await api(url);
   const tbody=document.getElementById('conn-table');updateSortArrows();
   if(!conns||conns.length===0){tbody.innerHTML='<tr><td colspan="10" class="empty">暂无活跃连接</td></tr>';return}
-  tbody.innerHTML=conns.map(c=>{const mode=escHtml(c.mode||'');const modeCls=mode.startsWith('sock')?'sock':'http';const rule=escHtml(c.rule||'');const ruleText=rule==='direct'?'直连':(rule==='clash'?'兜底':(rule==='upstream'?'上游':'代理'));const dialed=escHtml(c.dialed_addr||'');return`<tr><td class="mono">${escHtml(c.id)}</td><td class="mono">${escHtml(c.source)}</td><td class="mono">${escHtml(c.target)}</td><td class="mono" title="${dialed}">${dialed||'-'}</td><td><span class="tag ${modeCls}">${mode}</span></td><td><span class="tag ${rule}">${ruleText}</span></td><td class="mono" title="${escHtml(c.matched||'')}">${escHtml(c.matched||'-')}</td><td class="mono">${fmtBytes(c.upload||0)}</td><td class="mono">${fmtBytes(c.download||0)}</td><td>${new Date(c.start_time).toLocaleTimeString()}</td></tr>`}).join('');
+  tbody.innerHTML=conns.map(c=>{const mode=escHtml(c.mode||'');const modeCls=mode.startsWith('sock')?'sock':'http';const rule=escHtml(c.rule||'');const ruleText=rule==='direct'?'直连':'代理';const dialed=escHtml(c.dialed_addr||'');return`<tr><td class="mono">${escHtml(c.id)}</td><td class="mono">${escHtml(c.source)}</td><td class="mono">${escHtml(c.target)}</td><td class="mono" title="${dialed}">${dialed||'-'}</td><td><span class="tag ${modeCls}">${mode}</span></td><td><span class="tag ${rule}">${ruleText}</span></td><td class="mono" title="${escHtml(c.matched||'')}">${escHtml(c.matched||'-')}</td><td class="mono">${fmtBytes(c.upload||0)}</td><td class="mono">${fmtBytes(c.download||0)}</td><td>${new Date(c.start_time).toLocaleTimeString()}</td></tr>`}).join('');
 }
 
 function setRulesDirty(d){rulesDirty=d;document.getElementById('rules-dirty').style.display=d?'':'none'}
 function clearRulesDirty(){setRulesDirty(false)}
-async function loadRules(){const rules=await api('/api/rules');ruleList=(rules||[]).map(r=>({type:r.type,value:String(r.value||''),action:['direct','upstream'].includes(r.action)?r.action:'proxy'}));setRulesDirty(false);renderAllRules()}
-function renderAllRules(){renderDomains('direct');renderDomains('proxy');renderDomains('upstream');renderOtherRules()}
+async function loadRules(){const rules=await api('/api/rules');ruleList=(rules||[]).map(r=>({type:r.type,value:String(r.value||''),action:r.action==='direct'?'direct':'proxy'}));setRulesDirty(false);renderAllRules()}
+function renderAllRules(){renderDomains('direct');renderDomains('proxy');renderOtherRules()}
 function domainRules(action){return ruleList.filter(r=>r.type==='domain'&&r.action===action)}
 function renderDomains(type){
   const list=domainRules(type);const tbody=document.getElementById(type+'-table');
@@ -707,7 +747,7 @@ function renderOtherRules(){
   if(others.length===0){tbody.innerHTML='<tr><td colspan="4" class="empty">暂无规则</td></tr>';return}
   tbody.innerHTML=others.map(r=>{
     const typeLabel=r.type==='ipcidr'?'<span class="tag">IP段</span>':(r.type==='cfip'?'<span class="tag">CF IP段</span>':'<span class="tag">关键词</span>');
-    const act=r.action==='direct'?'<span class="tag direct">直连</span>':(r.action==='upstream'?'<span class="tag upstream">上游</span>':'<span class="tag proxy">代理</span>');
+    const act=r.action==='direct'?'<span class="tag direct">直连</span>':'<span class="tag proxy">代理</span>';
     return`<tr><td>${typeLabel}</td><td class="mono">${escHtml(r.value||'-')}</td><td>${act}</td><td><button class="btn btn-ghost btn-sm" onclick="removeRule(${ruleList.indexOf(r)})">✕</button></td></tr>`
   }).join('')
 }
@@ -760,7 +800,7 @@ function renderCFIPs(){
   if(!cfipState||!cfipState.effective){tbody.innerHTML='<tr><td colspan="3" class="empty">加载失败</td></tr>';return}
   const addSet=new Set(cfipState.add||[]);
   if(cfipState.effective.length===0){tbody.innerHTML='<tr><td colspan="3" class="empty">生效集为空，cfip 规则将永不命中</td></tr>';return}
-  tbody.innerHTML=cfipState.effective.map(c=>{const custom=addSet.has(c);return`<tr><td class="mono">${escHtml(c)}</td><td>${custom?'<span class="tag upstream">自定义</span>':'<span class="tag">内置</span>'}</td><td><button class="btn btn-ghost btn-sm" onclick="delCFIP('${escHtml(c)}')">✕</button></td></tr>`}).join('')
+  tbody.innerHTML=cfipState.effective.map(c=>{const custom=addSet.has(c);return`<tr><td class="mono">${escHtml(c)}</td><td>${custom?'<span class="tag custom">自定义</span>':'<span class="tag">内置</span>'}</td><td><button class="btn btn-ghost btn-sm" onclick="delCFIP('${escHtml(c)}')">✕</button></td></tr>`}).join('')
 }
 async function addCFIP(){
   const input=document.getElementById('cfip-input');const v=input.value.trim();
@@ -788,12 +828,12 @@ async function resetCFIPs(){
 }
 window.addEventListener('beforeunload',e=>{if(rulesDirty){e.preventDefault();e.returnValue=''}})
 
-async function loadConfig(){const c=await api('/api/config');document.getElementById('cfg-listen').value=c.listen_addr;document.getElementById('cfg-server').value=c.server_addr;document.getElementById('cfg-serverip').value=c.server_ip;document.getElementById('cfg-token').value=c.token;document.getElementById('cfg-dns').value=c.dns_server;document.getElementById('cfg-ech').value=c.ech_domain;document.getElementById('cfg-routing').value=c.routing_mode;document.getElementById('cfg-proxyip').value=c.proxy_ip||'';document.getElementById('cfg-web').value=(c.web_addr||'').replace(/^:/,'');document.getElementById('cfg-password').value=c.web_password||'';document.getElementById('cfg-upstream').value=c.upstream||'';document.getElementById('cfg-fallback').value=c.fallback||'on';document.getElementById('cfg-recycle-bytes').value=c.recycle_bytes||'0';document.getElementById('cfg-recycle-duration').value=c.recycle_duration||'0'}
-async function saveConfig(){await api('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({listen_addr:document.getElementById('cfg-listen').value,server_addr:document.getElementById('cfg-server').value,server_ip:document.getElementById('cfg-serverip').value,token:document.getElementById('cfg-token').value,dns_server:document.getElementById('cfg-dns').value,ech_domain:document.getElementById('cfg-ech').value,proxy_ip:document.getElementById('cfg-proxyip').value,routing_mode:document.getElementById('cfg-routing').value,web_addr:document.getElementById('cfg-web').value,web_password:document.getElementById('cfg-password').value,upstream:document.getElementById('cfg-upstream').value,fallback:document.getElementById('cfg-fallback').value,recycle_bytes:document.getElementById('cfg-recycle-bytes').value,recycle_duration:document.getElementById('cfg-recycle-duration').value})});toast('配置已保存（监听/端口类需重启，其余立即生效）');loadConfig()}
+async function loadConfig(){const c=await api('/api/config');document.getElementById('cfg-listen').value=c.listen_addr;document.getElementById('cfg-server').value=c.server_addr;document.getElementById('cfg-serverip').value=c.server_ip;document.getElementById('cfg-token').value=c.token;document.getElementById('cfg-dns').value=c.dns_server;document.getElementById('cfg-ech').value=c.ech_domain;document.getElementById('cfg-routing').value=c.routing_mode;document.getElementById('cfg-web').value=(c.web_addr||'').replace(/^:/,'');document.getElementById('cfg-password').value=c.web_password||''}
+async function saveConfig(){await api('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({listen_addr:document.getElementById('cfg-listen').value,server_addr:document.getElementById('cfg-server').value,server_ip:document.getElementById('cfg-serverip').value,token:document.getElementById('cfg-token').value,dns_server:document.getElementById('cfg-dns').value,ech_domain:document.getElementById('cfg-ech').value,routing_mode:document.getElementById('cfg-routing').value,web_addr:document.getElementById('cfg-web').value,web_password:document.getElementById('cfg-password').value})});toast('配置已保存（监听/端口类需重启，其余立即生效）');loadConfig()}
 async function refreshECH(){const r=await api('/api/service/refresh-ech',{method:'POST'});toast(r.message||r.error);loadOverview()}
 
 let ws;
-function connectWS(){const proto=location.protocol==='https:'?'wss:':'ws:';ws=new WebSocket(`${proto}//${location.host}/ws`);ws.onmessage=(e)=>{try{const d=JSON.parse(e.data);document.getElementById('ov-active').textContent=d.active_conns;document.getElementById('ov-total-up').textContent=fmtBytes(d.total_upload);document.getElementById('ov-total-down').textContent=fmtBytes(d.total_download);document.getElementById('ov-mem').textContent=d.memory_mb.toFixed(1)+' MB';document.getElementById('ov-speed-up').textContent=fmtSpeed(d.rt_upload||0);document.getElementById('ov-speed-down').textContent=fmtSpeed(d.rt_download||0)}catch(ex){}};ws.onclose=()=>setTimeout(connectWS,3000)}
+function connectWS(){const proto=location.protocol==='https:'?'wss:':'ws:';ws=new WebSocket(`${proto}//${location.host}/ws`);ws.onmessage=(e)=>{try{const d=JSON.parse(e.data);document.getElementById('ov-active').textContent=d.active_conns;document.getElementById('ov-total-up').textContent=fmtBytes(d.total_upload);document.getElementById('ov-total-down').textContent=fmtBytes(d.total_download);document.getElementById('ov-mem').textContent=d.memory_mb.toFixed(1)+' MB';document.getElementById('ov-speed-up').textContent=fmtSpeed(d.rt_upload||0);document.getElementById('ov-speed-down').textContent=fmtSpeed(d.rt_download||0);document.getElementById('tf-active').textContent=d.active_conns;document.getElementById('tf-speed-up').textContent=fmtSpeed(d.rt_upload||0);document.getElementById('tf-speed-down').textContent=fmtSpeed(d.rt_download||0);document.getElementById('tf-total-up').textContent=fmtBytes(d.total_upload||0);document.getElementById('tf-total-down').textContent=fmtBytes(d.total_download||0);document.getElementById('tf-uptime').textContent=fmtUptime(d.uptime);pushTrafficSample(d.rt_upload,d.rt_download)}catch(ex){}};ws.onclose=()=>setTimeout(connectWS,3000)}
 connectWS();
 </script>
 </body>
