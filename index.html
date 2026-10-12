@@ -573,7 +573,7 @@ let connSortBy='start_time',connSortOrder='desc';
 let ruleList = [];
 let rulesDirty = false;
 
-// ===== 日志页 =====
+// ===== 实时日志（概览页） =====
 let logList=[],logsTimer=null;
 async function loadLogs(){try{const logs=await api('/api/logs');logList=logs||[]}catch(e){}renderLogs()}
 function renderLogs(){

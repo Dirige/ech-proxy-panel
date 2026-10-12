@@ -207,7 +207,7 @@ func main() {
 	logBuffer = make([]logEntry, 0, 200)
 	dnsCache = make(map[string]dnsCacheEntry)
 
-	// 日志同时写入缓冲区（面板日志页读取）
+	// 日志同时写入缓冲区（面板概览页日志面板读取）
 	log.SetOutput(&logWriter{original: os.Stderr})
 
 	// 加载自定义规则：-rules CSV（只读桶） + 面板 rules.json（可编辑桶）
@@ -1957,7 +1957,7 @@ func applyEnvDefaults() {
 
 // ======================== 日志缓冲 ========================
 
-// logWriter 日志写出器：写 stderr 的同时进入缓冲（面板日志页读取）
+// logWriter 日志写出器：写 stderr 的同时进入缓冲（面板概览页日志面板读取）
 type logWriter struct {
 	original io.Writer
 }
