@@ -94,11 +94,7 @@ var (
 	panelRules    []customRule
 	customRulesMu sync.RWMutex
 
-	// CF 网段用户增减量：生效集 = 内置快照 ∪ cfipAdd − cfipDel（存 config.json）
-	cfipAdd []string
-	cfipDel []string
-
-	// DNS 解析结果缓存（规则 ipcidr/cfip 匹配域名时避免重复查询）
+	// DNS 解析结果缓存（规则 ipcidr 匹配域名时避免重复查询）
 	dnsCache   map[string]dnsCacheEntry
 	dnsCacheMu sync.RWMutex
 )
@@ -173,12 +169,6 @@ func main() {
 		if webPassword == "" && cfg.WebPassword != "" {
 			webPassword = cfg.WebPassword
 		}
-		if cfg.CfipAdd != nil {
-			cfipAdd = cfg.CfipAdd
-		}
-		if cfg.CfipDel != nil {
-			cfipDel = cfg.CfipDel
-		}
 	} else if configFile != "" {
 		log.Printf("[启动] 配置文件不存在或无效，使用命令行参数")
 	}
@@ -193,9 +183,6 @@ func main() {
 			}
 		}
 	}
-
-	// 应用 CF 网段增减量
-	rebuildCFNets()
 
 	// 面板默认监听 :30001（可用 -web / ECH_WEB / 配置文件 web_addr 覆盖）
 	if webAddr == "" {
@@ -1831,24 +1818,22 @@ func sendSuccessResponse(conn net.Conn, mode int) error {
 
 // customRule 自定义规则
 type customRule struct {
-	Type   string `json:"type"`   // domain, ipcidr, keyword, cfip
-	Value  string `json:"value"`  // 规则值（cfip 为可选备注，匹配只看内置 CF 段）
+	Type   string `json:"type"`   // domain, ipcidr, keyword
+	Value  string `json:"value"`  // 规则值（domain 支持通配符 *.example.com）
 	Action string `json:"action"` // proxy(ECH) 或 direct
 }
 
 // appConfig 应用配置
 type appConfig struct {
-	ListenAddr  string   `json:"listen_addr"`
-	ServerAddr  string   `json:"server_addr"`
-	ServerIP    string   `json:"server_ip"`
-	Token       string   `json:"token"`
-	DNSServer   string   `json:"dns_server"`
-	ECHDomain   string   `json:"ech_domain"`
-	RoutingMode string   `json:"routing_mode"`
-	WebAddr     string   `json:"web_addr"`
-	WebPassword string   `json:"web_password"`
-	CfipAdd     []string `json:"cfip_add"`
-	CfipDel     []string `json:"cfip_del"`
+	ListenAddr  string `json:"listen_addr"`
+	ServerAddr  string `json:"server_addr"`
+	ServerIP    string `json:"server_ip"`
+	Token       string `json:"token"`
+	DNSServer   string `json:"dns_server"`
+	ECHDomain   string `json:"ech_domain"`
+	RoutingMode string `json:"routing_mode"`
+	WebAddr     string `json:"web_addr"`
+	WebPassword string `json:"web_password"`
 }
 
 // loadConfig 从文件加载配置
@@ -1876,8 +1861,6 @@ func saveConfig(filePath string) error {
 		RoutingMode: routingMode,
 		WebAddr:     webAddr,
 		WebPassword: webPassword,
-		CfipAdd:     cfipAdd,
-		CfipDel:     cfipDel,
 	}
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
@@ -1892,7 +1875,7 @@ func saveConfig(filePath string) error {
 }
 
 // appVersion 面板与镜像版本号（发版时同步改这里 + workflow tag）
-const appVersion = "1.4"
+const appVersion = "1.5"
 
 // validHostPort 校验 host:port 格式（:30001、0.0.0.0:30000、example.com:443 均合法）
 func validHostPort(s string) bool {
@@ -2166,7 +2149,7 @@ func copyCount(dst io.Writer, src io.Reader, info *connInfo, upload bool) {
 
 // ======================== DNS 解析缓存 ========================
 
-// lookupIPWithCache 带缓存的 DNS 查询（规则 ipcidr/cfip 匹配域名时用，缓存 5 分钟）
+// lookupIPWithCache 带缓存的 DNS 查询（规则 ipcidr 匹配域名时用，缓存 5 分钟）
 func lookupIPWithCache(host string) ([]net.IP, error) {
 	dnsCacheMu.RLock()
 	entry, ok := dnsCache[host]
@@ -2247,7 +2230,7 @@ func matchCustomRule(targetHost string) (bool, customRule, outboundKind) {
 	// 检查是否是IP地址
 	isIP := net.ParseIP(host) != nil
 
-	// ipcidr/cfip 规则对域名目标同样生效——按规则顺序遍历，遇到第一条需要 IP 的规则时才解析一次
+	// ipcidr 规则对域名目标同样生效——按规则顺序遍历，遇到第一条需要 IP 的规则时才解析一次
 	var resolvedIPs []net.IP
 	resolved := false
 	resolveOnce := func() {
@@ -2300,20 +2283,6 @@ func matchCustomRule(targetHost string) (bool, customRule, outboundKind) {
 					return true, rule, ruleActionToOutbound(rule.Action)
 				}
 			}
-		case "cfip":
-			// 内置 Cloudflare IP 段匹配：IP 字面量直接查，域名先解析再查
-			if isIP {
-				if ip := net.ParseIP(host); ip != nil && isCloudflareIP(ip) {
-					return true, rule, ruleActionToOutbound(rule.Action)
-				}
-				continue
-			}
-			resolveOnce()
-			for _, ip := range resolvedIPs {
-				if isCloudflareIP(ip) {
-					return true, rule, ruleActionToOutbound(rule.Action)
-				}
-			}
 		case "keyword":
 			if rule.Value != "" && strings.Contains(host, strings.ToLower(rule.Value)) {
 				return true, rule, ruleActionToOutbound(rule.Action)
@@ -2322,92 +2291,6 @@ func matchCustomRule(targetHost string) (bool, customRule, outboundKind) {
 	}
 	// 没有匹配规则
 	return false, customRule{}, outECH
-}
-
-// ======================== CF 网段（cfip 规则 + 面板增删管理） ========================
-
-// cfIPNets 内置 Cloudflare IP 段快照（来源 https://www.cloudflare.com/ips/ ，页面标注最后更新 2023-09-28）。
-// 用于 cfip 规则类型：目标 IP 命中这些网段即算 Cloudflare IP。
-var cfIPNets = mustParseCIDRs([]string{
-	// IPv4
-	"103.21.244.0/22", "103.22.200.0/22", "103.31.4.0/22", "104.16.0.0/13",
-	"104.24.0.0/14", "108.162.192.0/18", "131.0.72.0/22", "141.101.64.0/18",
-	"162.158.0.0/15", "172.64.0.0/13", "173.245.48.0/20", "188.114.96.0/20",
-	"190.93.240.0/20", "197.234.240.0/22", "198.41.128.0/17",
-	// IPv6
-	"2400:cb00::/32", "2606:4700::/32", "2803:f800::/32", "2405:b500::/32",
-	"2405:8100::/32", "2a06:98c0::/29", "2c0f:f248::/32",
-})
-
-// mustParseCIDRs 解析内置网段（字面量写错时 panic，等价于编译期暴露问题）
-func mustParseCIDRs(cidrs []string) []*net.IPNet {
-	nets := make([]*net.IPNet, 0, len(cidrs))
-	for _, c := range cidrs {
-		_, n, err := net.ParseCIDR(c)
-		if err != nil {
-			panic("内置 CF 网段解析失败: " + c)
-		}
-		nets = append(nets, n)
-	}
-	return nets
-}
-
-// cfEffectiveNets 生效 CF 网段 = 内置快照 ∪ 用户新增 − 用户删除
-var (
-	cfEffectiveNets []*net.IPNet
-	cfEffectiveMu   sync.RWMutex
-)
-
-// rebuildCFNets 重建生效 CF 网段（启动加载配置后与 /api/cfips 变更时调用）
-func rebuildCFNets() {
-	del := make(map[string]bool, len(cfipDel))
-	for _, c := range cfipDel {
-		if _, n, err := net.ParseCIDR(strings.TrimSpace(c)); err == nil {
-			del[n.String()] = true
-		}
-	}
-	seen := make(map[string]bool)
-	var out []*net.IPNet
-	for _, n := range cfIPNets {
-		if !del[n.String()] {
-			out = append(out, n)
-			seen[n.String()] = true
-		}
-	}
-	for _, c := range cfipAdd {
-		if _, n, err := net.ParseCIDR(strings.TrimSpace(c)); err == nil && !seen[n.String()] {
-			out = append(out, n)
-			seen[n.String()] = true
-		}
-	}
-	cfEffectiveMu.Lock()
-	cfEffectiveNets = out
-	cfEffectiveMu.Unlock()
-}
-
-// cfStrs 网段列表转字符串（面板展示用）
-func cfStrs(nets []*net.IPNet) []string {
-	out := make([]string, 0, len(nets))
-	for _, n := range nets {
-		out = append(out, n.String())
-	}
-	return out
-}
-
-// isCloudflareIP 判断 IP 是否落在生效 CF 段内
-func isCloudflareIP(ip net.IP) bool {
-	cfEffectiveMu.RLock()
-	nets := cfEffectiveNets
-	cfEffectiveMu.RUnlock()
-	if nets == nil {
-		nets = cfIPNets
-	}
-	for _, n := range nets {
-		if n.Contains(ip) {
-			return true
-		}
-	}
-	return false
 }
 
 // ======================== 自定义规则 ========================
@@ -2438,7 +2321,7 @@ func parseRulesFile(filePath string) ([]customRule, error) {
 		value := strings.TrimSpace(parts[1])
 		action := strings.TrimSpace(parts[2])
 
-		if ruleType != "domain" && ruleType != "ipcidr" && ruleType != "keyword" && ruleType != "cfip" {
+		if ruleType != "domain" && ruleType != "ipcidr" && ruleType != "keyword" {
 			continue
 		}
 		if action == "upstream" { // 该动作已移除（仅保留 direct/proxy 两种出站）
@@ -2448,7 +2331,7 @@ func parseRulesFile(filePath string) ([]customRule, error) {
 		if action != "proxy" && action != "direct" {
 			continue
 		}
-		if value == "" && ruleType != "cfip" { // cfip 的 value 只是备注，可为空
+		if value == "" {
 			continue
 		}
 
@@ -2636,7 +2519,6 @@ func startWebServer(addr string) {
 	mux.Handle("/api/logs", authMiddleware(http.HandlerFunc(handleLogs)))
 	mux.Handle("/api/service/", authMiddleware(http.HandlerFunc(handleService)))
 	mux.Handle("/api/exit-info", authMiddleware(http.HandlerFunc(handleExitInfo)))
-	mux.Handle("/api/cfips", authMiddleware(http.HandlerFunc(handleCFIPs)))
 	mux.Handle("/ws", authMiddleware(http.HandlerFunc(handleWebSocket)))
 
 	log.Printf("[Web] 管理面板启动: http://%s", addr)
@@ -2953,8 +2835,6 @@ func handleRules(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, fmt.Sprintf(`{"error":"第 %d 条 ipcidr 格式无效: %s"}`, i+1, rule.Value), 400)
 				return
 			}
-		case "cfip":
-			// value 只是备注（匹配只看内置 CF 段），允许任意文本
 		default:
 			http.Error(w, fmt.Sprintf(`{"error":"第 %d 条类型无效: %s"}`, i+1, rule.Type), 400)
 			return
@@ -2980,90 +2860,6 @@ func handleRules(w http.ResponseWriter, r *http.Request) {
 	}
 
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
-}
-
-// handleCFIPs 管理生效 CF 网段：GET 返回内置快照/增减量/生效集；POST 更新增减量并持久化
-func handleCFIPs(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	if r.Method == "GET" {
-		cfEffectiveMu.RLock()
-		eff := cfStrs(cfEffectiveNets)
-		if eff == nil {
-			eff = cfStrs(cfIPNets)
-		}
-		cfEffectiveMu.RUnlock()
-		add := append([]string{}, cfipAdd...)
-		del := append([]string{}, cfipDel...)
-		if add == nil {
-			add = []string{}
-		}
-		if del == nil {
-			del = []string{}
-		}
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"builtin":   cfStrs(cfIPNets),
-			"add":       add,
-			"del":       del,
-			"effective": eff,
-		})
-		return
-	}
-	if r.Method != "POST" {
-		http.Error(w, `{"error":"method not allowed"}`, 405)
-		return
-	}
-	var body struct {
-		Add []string `json:"add"`
-		Del []string `json:"del"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		http.Error(w, `{"error":"invalid json"}`, 400)
-		return
-	}
-	norm := func(list []string) ([]string, error) {
-		seen := map[string]bool{}
-		out := []string{}
-		for _, c := range list {
-			_, n, err := net.ParseCIDR(strings.TrimSpace(c))
-			if err != nil {
-				return nil, fmt.Errorf("网段格式无效: %s", c)
-			}
-			if !seen[n.String()] {
-				seen[n.String()] = true
-				out = append(out, n.String())
-			}
-		}
-		return out, nil
-	}
-	add, err := norm(body.Add)
-	if err != nil {
-		http.Error(w, `{"error":"`+err.Error()+`"}`, 400)
-		return
-	}
-	del, err := norm(body.Del)
-	if err != nil {
-		http.Error(w, `{"error":"`+err.Error()+`"}`, 400)
-		return
-	}
-	builtin := map[string]bool{}
-	for _, n := range cfIPNets {
-		builtin[n.String()] = true
-	}
-	for _, c := range del {
-		if !builtin[c] {
-			http.Error(w, `{"error":"只能删除内置快照中的网段: `+c+`"}`, 400)
-			return
-		}
-	}
-	cfipAdd, cfipDel = add, del
-	rebuildCFNets()
-	if err := saveConfig(configFile); err != nil {
-		log.Printf("[规则] 保存 CF 增减量失败: %v", err)
-	}
-	cfEffectiveMu.RLock()
-	eff := cfStrs(cfEffectiveNets)
-	cfEffectiveMu.RUnlock()
-	json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok", "effective": eff})
 }
 
 // handleConnections 获取活跃连接（支持搜索和排序）

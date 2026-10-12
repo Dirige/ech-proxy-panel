@@ -319,27 +319,19 @@ select.theme-select:focus{outline:none;border-color:var(--cyan)}
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4"/></svg>
       <span>连接</span>
     </div>
-    <div class="nav-item" data-page="logs">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M4 6h16M4 12h16M4 18h10"/><path d="M14 18l2 2 4-4"/></svg>
-      <span>日志</span>
-    </div>
     <div class="nav-item" data-page="traffic">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M3 17l6-6 4 4 8-8"/><path d="M14 7h7v7"/></svg>
       <span>流量</span>
     </div>
-    <div class="nav-item" data-page="rules">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
-      <span>规则</span>
-    </div>
     <div class="nav-item" data-page="config">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 01-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
-      <span>配置</span>
+      <span>规则配置</span>
     </div>
   </div>
   <div class="sidebar-footer">
     <span class="status-dot"></span>
     <span>运行中</span>
-    <span class="mono" id="app-version" style="opacity:.55" title="面板版本">v1.4</span>
+    <span class="mono" id="app-version" style="opacity:.55" title="面板版本">v1.5</span>
   </div>
 </div>
 
@@ -388,6 +380,24 @@ select.theme-select:focus{outline:none;border-color:var(--cyan)}
       </button>
       <button class="btn" onclick="detectExitInfo(true)">重新检测出口</button>
     </div>
+
+    <div class="panel" style="margin-top:16px">
+      <div class="panel-header">
+        <span class="panel-title">实时日志（最近 200 条，3 秒自动刷新）</span>
+        <div class="actions" style="margin:0">
+          <select id="log-filter" class="theme-select" onchange="renderLogs()">
+            <option value="">全部级别</option>
+            <option value="warn">警告及以上</option>
+            <option value="error">仅错误</option>
+          </select>
+          <button class="btn btn-sm" onclick="loadLogs()">刷新</button>
+          <button class="btn btn-sm" onclick="clearLogView()">清空显示</button>
+        </div>
+      </div>
+      <div class="panel-body" style="padding:0">
+        <div class="log-area" id="logs-view" style="border:none;border-radius:0;max-height:340px"><div class="empty">暂无日志</div></div>
+      </div>
+    </div>
   </div>
 
   <!-- 连接 -->
@@ -434,28 +444,6 @@ select.theme-select:focus{outline:none;border-color:var(--cyan)}
     </div>
   </div>
 
-  <!-- 日志 -->
-  <div class="page" id="page-logs">
-    <div class="page-header">
-      <h1 class="page-title">运行<span class="accent">日志</span></h1>
-      <div class="actions" style="margin:0">
-        <select id="log-filter" class="theme-select" onchange="renderLogs()">
-          <option value="">全部级别</option>
-          <option value="warn">警告及以上</option>
-          <option value="error">仅错误</option>
-        </select>
-        <button class="btn" onclick="loadLogs()">刷新</button>
-        <button class="btn" onclick="clearLogView()">清空显示</button>
-      </div>
-    </div>
-    <div class="panel">
-      <div class="panel-header"><span class="panel-title">实时日志（最近 200 条，3 秒自动刷新）</span></div>
-      <div class="panel-body" style="padding:0">
-        <div class="log-area" id="logs-view" style="border:none;border-radius:0;max-height:calc(100vh - 250px)"><div class="empty">暂无日志</div></div>
-      </div>
-    </div>
-  </div>
-
   <!-- 流量 -->
   <div class="page" id="page-traffic">
     <div class="page-header">
@@ -482,89 +470,14 @@ select.theme-select:focus{outline:none;border-color:var(--cyan)}
     </div>
   </div>
 
-  <!-- 规则 -->
-  <div class="page" id="page-rules">
-    <div class="page-header">
-      <h1 class="page-title">分流<span class="accent">规则</span></h1>
-      <div class="actions" style="margin:0">
-        <span id="rules-dirty" class="tag" style="display:none;background:rgba(255,149,0,.15);color:var(--orange);border-color:var(--orange)">未保存</span>
-        <button class="btn btn-primary" onclick="saveRules()">保存规则</button>
-        <button class="btn" onclick="refreshRules()">刷新</button>
-      </div>
-    </div>
-    <div class="rules-grid">
-      <div class="rules-col">
-        <h3><span class="dot" style="background:var(--green)"></span>直连域名</h3>
-        <div class="domain-input">
-          <input id="direct-input" placeholder="输入域名，如 baidu.com" onkeydown="if(event.key==='Enter')addDomain('direct')">
-          <button class="btn btn-sm btn-primary" onclick="addDomain('direct')">添加</button>
-        </div>
-        <div class="table-wrap" style="box-shadow:none">
-          <table class="table">
-            <thead><tr><th>域名</th><th style="width:50px"></th></tr></thead>
-            <tbody id="direct-table"></tbody>
-          </table>
-        </div>
-      </div>
-      <div class="rules-col">
-        <h3><span class="dot" style="background:var(--cyan)"></span>代理域名</h3>
-        <div class="domain-input">
-          <input id="proxy-input" placeholder="输入域名，如 google.com" onkeydown="if(event.key==='Enter')addDomain('proxy')">
-          <button class="btn btn-sm btn-primary" onclick="addDomain('proxy')">添加</button>
-        </div>
-        <div class="table-wrap" style="box-shadow:none">
-          <table class="table">
-            <thead><tr><th>域名</th><th style="width:50px"></th></tr></thead>
-            <tbody id="proxy-table"></tbody>
-          </table>
-        </div>
-      </div>
-    </div>
-    <div class="rules-col" style="margin-top:16px">
-      <h3><span class="dot" style="background:var(--orange)"></span>IP 段 / CF IP 段 / 关键词规则</h3>
-      <div class="domain-input">
-        <select id="other-type" class="theme-select" onchange="otherTypeChanged()">
-          <option value="ipcidr">IP 段</option>
-          <option value="cfip">CF IP 段</option>
-          <option value="keyword">关键词</option>
-        </select>
-        <input id="other-input" placeholder="IP 段如 10.0.0.0/8，或关键词如 tracker" onkeydown="if(event.key==='Enter')addOtherRule()">
-        <select id="other-action" class="theme-select">
-          <option value="direct">直连</option>
-          <option value="proxy">代理</option>
-        </select>
-        <button class="btn btn-sm btn-primary" onclick="addOtherRule()">添加</button>
-      </div>
-      <div class="table-wrap" style="box-shadow:none">
-        <table class="table">
-          <thead><tr><th style="width:80px">类型</th><th>值</th><th style="width:70px">动作</th><th style="width:50px"></th></tr></thead>
-          <tbody id="other-table"></tbody>
-        </table>
-      </div>
-      <div class="hint" style="margin-top:8px">域名规则在上表两列编辑；IP 段规则对解析后的域名同样生效（按规则顺序匹配）；CF IP 段按下表生效集匹配（value 仅备注）。规则动作仅"直连"与"代理"两种出站，优先于分流模式。仅"面板规则"可在此编辑，<code>-rules</code> 启动参数加载的规则需改文件后重启。</div>
-    </div>
-    <div class="rules-col" style="margin-top:16px">
-      <h3><span class="dot" style="background:var(--violet)"></span>CF IP 段管理（内置快照 ± 自定义）</h3>
-      <div class="domain-input">
-        <input id="cfip-input" placeholder="CIDR，如 104.16.0.0/13" onkeydown="if(event.key==='Enter')addCFIP()">
-        <button class="btn btn-sm btn-primary" onclick="addCFIP()">添加</button>
-        <button class="btn btn-sm" onclick="resetCFIPs()">恢复内置快照</button>
-      </div>
-      <div class="table-wrap" style="box-shadow:none">
-        <table class="table">
-          <thead><tr><th>网段</th><th style="width:90px">来源</th><th style="width:50px"></th></tr></thead>
-          <tbody id="cfip-table"></tbody>
-        </table>
-      </div>
-      <div class="hint" style="margin-top:8px">生效集 = 内置快照 ∪ 自定义新增 − 自定义删除；<code>cfip</code> 类型规则按此生效集匹配。修改立即生效并持久化。</div>
-    </div>
-  </div>
-
-  <!-- 配置 -->
+  <!-- 规则与配置 -->
   <div class="page" id="page-config">
     <div class="page-header">
-      <h1 class="page-title">系统<span class="accent">配置</span></h1>
+      <h1 class="page-title">规则与<span class="accent">配置</span></h1>
       <div class="actions" style="margin:0">
+        <span id="rules-dirty" class="tag" style="display:none;background:rgba(255,149,0,.15);color:var(--orange);border-color:var(--orange)">未保存</span>
+        <button class="btn" onclick="refreshRules()">刷新规则</button>
+        <button class="btn btn-primary" onclick="saveRules()">保存规则</button>
         <button class="btn btn-primary" onclick="saveConfig()">保存并刷新 ECH</button>
       </div>
     </div>
@@ -591,6 +504,59 @@ select.theme-select:focus{outline:none;border-color:var(--cyan)}
       </div>
       <div class="config-item"><label>面板密码</label><input id="cfg-password" type="password" placeholder="留空 = 无需登录"></div>
     </div>
+
+    <div style="margin-top:24px;border-top:1px solid #21262d;padding-top:18px">
+      <div class="rules-grid">
+        <div class="rules-col">
+          <h3><span class="dot" style="background:var(--green)"></span>直连域名</h3>
+          <div class="domain-input">
+            <input id="direct-input" placeholder="域名如 baidu.com，或通配符 *.baidu.com" onkeydown="if(event.key==='Enter')addDomain('direct')">
+            <button class="btn btn-sm btn-primary" onclick="addDomain('direct')">添加</button>
+          </div>
+          <div class="table-wrap" style="box-shadow:none">
+            <table class="table">
+              <thead><tr><th>域名</th><th style="width:50px"></th></tr></thead>
+              <tbody id="direct-table"></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="rules-col">
+          <h3><span class="dot" style="background:var(--cyan)"></span>代理域名</h3>
+          <div class="domain-input">
+            <input id="proxy-input" placeholder="域名如 google.com，或通配符 *.google.com" onkeydown="if(event.key==='Enter')addDomain('proxy')">
+            <button class="btn btn-sm btn-primary" onclick="addDomain('proxy')">添加</button>
+          </div>
+          <div class="table-wrap" style="box-shadow:none">
+            <table class="table">
+              <thead><tr><th>域名</th><th style="width:50px"></th></tr></thead>
+              <tbody id="proxy-table"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+      <div class="rules-col" style="margin-top:16px">
+        <h3><span class="dot" style="background:var(--orange)"></span>IP 段 / 关键词规则</h3>
+        <div class="domain-input">
+          <select id="other-type" class="theme-select" onchange="otherTypeChanged()">
+            <option value="ipcidr">IP 段</option>
+            <option value="keyword">关键词</option>
+          </select>
+          <input id="other-input" placeholder="IP 段如 10.0.0.0/8，或关键词如 tracker" onkeydown="if(event.key==='Enter')addOtherRule()">
+          <select id="other-action" class="theme-select">
+            <option value="direct">直连</option>
+            <option value="proxy">代理</option>
+          </select>
+          <button class="btn btn-sm btn-primary" onclick="addOtherRule()">添加</button>
+        </div>
+        <div class="table-wrap" style="box-shadow:none">
+          <table class="table">
+            <thead><tr><th style="width:80px">类型</th><th>值</th><th style="width:70px">动作</th><th style="width:50px"></th></tr></thead>
+            <tbody id="other-table"></tbody>
+          </table>
+        </div>
+        <div class="hint" style="margin-top:8px">域名规则支持通配符 <code>*.example.com</code>（匹配该域名本身与全部子域名）；IP 段规则对解析后的域名同样生效（按规则顺序匹配）。规则动作仅"直连"与"代理"两种出站，优先于分流模式。仅"面板规则"可在此编辑，<code>-rules</code> 启动参数加载的规则需改文件后重启。</div>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -602,9 +568,8 @@ function toast(msg){const t=document.getElementById('toast');t.textContent=msg;t
 let connRefreshTimer = null;
 let connPaused = false;
 let connIntervalMs = 3000;
-let overviewTimer = null;
 let connSortBy='start_time',connSortOrder='desc';
-// 规则页状态（顶层 let 必须在 switchPage(savedPage) 之前完成初始化，否则 TDZ 报错中断脚本）
+// 规则编辑状态（顶层 let 必须在 switchPage(savedPage) 之前完成初始化，否则 TDZ 报错中断脚本）
 let ruleList = [];
 let rulesDirty = false;
 
@@ -668,8 +633,8 @@ function changeConnInterval(){
 }
 
 function switchPage(pg){
-  // 规则页有未保存修改时，离开需确认（防止误点静默丢弃）
-  if(pg!=='rules'&&rulesDirty&&document.getElementById('page-rules').classList.contains('active')){
+  // 规则有未保存修改时，离开需确认（防止误点静默丢弃）
+  if(pg!=='config'&&rulesDirty&&document.getElementById('page-config').classList.contains('active')){
     if(!confirm('规则有未保存的修改，离开将丢弃这些修改。确定离开？'))return;
     clearRulesDirty();
   }
@@ -678,13 +643,17 @@ function switchPage(pg){
   document.querySelector(`.nav-item[data-page="${pg}"]`).classList.add('active');
   document.getElementById('page-'+pg).classList.add('active');
   localStorage.setItem('ech_page',pg);
-  if(pg==='overview')loadOverview();
+  stopConnRefresh();stopLogsRefresh();
+  if(pg==='overview'){loadOverview();startLogsRefresh()}
   else if(pg==='connections'){loadConnections();startConnRefresh()}
-  else{stopConnRefresh();stopLogsRefresh();if(pg==='rules'){loadRules();loadCFIPs()}else if(pg==='config')loadConfig();else if(pg==='logs')startLogsRefresh();else if(pg==='traffic')loadTraffic()}
+  else if(pg==='config'){loadConfig();loadRules()}
+  else if(pg==='traffic')loadTraffic();
 }
 document.querySelectorAll('.nav-item').forEach(el=>el.addEventListener('click',()=>switchPage(el.dataset.page)));
 
-const savedPage=localStorage.getItem('ech_page')||'overview';
+// 兼容旧版缓存的页面名（logs/rules 页已并入概览/规则配置）
+const _savedPage=localStorage.getItem('ech_page')||'overview';
+const savedPage=document.querySelector(`.nav-item[data-page="${_savedPage}"]`)?_savedPage:'overview';
 switchPage(savedPage);
 
 function fmtBytes(b){if(b===0)return '0 B';const k=1024;const u=['B','KB','MB','GB','TB'];const i=Math.floor(Math.log(b)/Math.log(k));return(b/Math.pow(k,i)).toFixed(i>0?2:0)+' '+u[i]}
@@ -714,7 +683,7 @@ async function loadOverview(){
     document.getElementById('ov-total-up').textContent=fmtBytes(status.total_upload);
     document.getElementById('ov-total-down').textContent=fmtBytes(status.total_download);
     document.getElementById('ov-mem').textContent=(status.memory_mb||0).toFixed(1)+' MB';
-    const ver=document.getElementById('app-version');if(ver)ver.textContent='v'+(status.version||'1.4');
+    const ver=document.getElementById('app-version');if(ver)ver.textContent='v'+(status.version||'1.5');
     detectIP();detectExitInfo();checkPing();
   }catch(e){if(e&&e.message==='未登录')return}
 }
@@ -746,7 +715,7 @@ function renderOtherRules(){
   const others=ruleList.filter(r=>r.type!=='domain');const tbody=document.getElementById('other-table');
   if(others.length===0){tbody.innerHTML='<tr><td colspan="4" class="empty">暂无规则</td></tr>';return}
   tbody.innerHTML=others.map(r=>{
-    const typeLabel=r.type==='ipcidr'?'<span class="tag">IP段</span>':(r.type==='cfip'?'<span class="tag">CF IP段</span>':'<span class="tag">关键词</span>');
+    const typeLabel=r.type==='ipcidr'?'<span class="tag">IP段</span>':'<span class="tag">关键词</span>';
     const act=r.action==='direct'?'<span class="tag direct">直连</span>':'<span class="tag proxy">代理</span>';
     return`<tr><td>${typeLabel}</td><td class="mono">${escHtml(r.value||'-')}</td><td>${act}</td><td><button class="btn btn-ghost btn-sm" onclick="removeRule(${ruleList.indexOf(r)})">✕</button></td></tr>`
   }).join('')
@@ -755,6 +724,7 @@ function renderRules(){setRulesDirty(true);renderAllRules()}
 function addDomain(type){
   const input=document.getElementById(type+'-input');const domain=input.value.trim();
   if(!domain){toast('请输入域名');return}
+  if(domain.includes('*')&&!/^\*\.[^*]+$/.test(domain)){toast('通配符仅支持 *.example.com 形式');return}
   if(domainRules(type).some(r=>r.value===domain)){input.value='';return}
   ruleList.push({type:'domain',value:domain,action:type});input.value='';renderRules()
 }
@@ -765,8 +735,7 @@ function validCidr(v){
 }
 function otherTypeChanged(){
   const type=document.getElementById('other-type').value;const input=document.getElementById('other-input');
-  if(type==='cfip'){input.placeholder='命中内置 Cloudflare 网段；备注可留空'}
-  else if(type==='ipcidr'){input.placeholder='IP 段如 10.0.0.0/8'}
+  if(type==='ipcidr'){input.placeholder='IP 段如 10.0.0.0/8'}
   else{input.placeholder='关键词如 tracker'}
 }
 function addOtherRule(){
@@ -774,10 +743,6 @@ function addOtherRule(){
   const input=document.getElementById('other-input');
   const action=document.getElementById('other-action').value;
   const value=input.value.trim();
-  if(type==='cfip'&&value===''){ // cfip 匹配只看内置网段，值仅备注
-    if(ruleList.some(r=>r.type==='cfip'&&r.action===action&&!r.value)){return}
-    ruleList.push({type,value:'',action});renderRules();return
-  }
   if(!value){toast('请输入规则值');return}
   if(type==='ipcidr'&&!validCidr(value)){toast('IP 段格式无效，示例：10.0.0.0/8');return}
   if(ruleList.some(r=>r.type===type&&r.value===value&&r.action===action)){input.value='';return}
@@ -792,39 +757,6 @@ async function saveRules(){
 function refreshRules(){
   if(rulesDirty&&!confirm('规则有未保存的修改，刷新将丢弃这些修改。确定刷新？'))return;
   loadRules()
-}
-let cfipState=null;
-async function loadCFIPs(){try{cfipState=await api('/api/cfips');renderCFIPs()}catch(e){cfipState=null;renderCFIPs()}}
-function renderCFIPs(){
-  const tbody=document.getElementById('cfip-table');
-  if(!cfipState||!cfipState.effective){tbody.innerHTML='<tr><td colspan="3" class="empty">加载失败</td></tr>';return}
-  const addSet=new Set(cfipState.add||[]);
-  if(cfipState.effective.length===0){tbody.innerHTML='<tr><td colspan="3" class="empty">生效集为空，cfip 规则将永不命中</td></tr>';return}
-  tbody.innerHTML=cfipState.effective.map(c=>{const custom=addSet.has(c);return`<tr><td class="mono">${escHtml(c)}</td><td>${custom?'<span class="tag custom">自定义</span>':'<span class="tag">内置</span>'}</td><td><button class="btn btn-ghost btn-sm" onclick="delCFIP('${escHtml(c)}')">✕</button></td></tr>`}).join('')
-}
-async function addCFIP(){
-  const input=document.getElementById('cfip-input');const v=input.value.trim();
-  if(!v){toast('请输入 CIDR');return}
-  if(!validCidr(v)){toast('格式无效，示例：104.16.0.0/13');return}
-  const add=[...(cfipState?cfipState.add:[]),v],del=cfipState?cfipState.del:[];
-  const r=await api('/api/cfips',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({add,del})});
-  if(r&&r.error){toast('保存失败：'+r.error);return}
-  input.value='';toast('CF 网段已更新');loadCFIPs()
-}
-async function delCFIP(cidr){
-  if(!cfipState)return;
-  let add=cfipState.add||[],del=cfipState.del||[];
-  if(add.includes(cidr))add=add.filter(c=>c!==cidr);
-  else del=[...del,cidr];
-  const r=await api('/api/cfips',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({add,del})});
-  if(r&&r.error){toast('保存失败：'+r.error);return}
-  toast('CF 网段已更新');loadCFIPs()
-}
-async function resetCFIPs(){
-  if(!confirm('清空自定义增删，恢复内置快照？'))return;
-  const r=await api('/api/cfips',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({add:[],del:[]})});
-  if(r&&r.error){toast('保存失败：'+r.error);return}
-  toast('已恢复内置快照');loadCFIPs()
 }
 window.addEventListener('beforeunload',e=>{if(rulesDirty){e.preventDefault();e.returnValue=''}})
 

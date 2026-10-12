@@ -7,7 +7,5 @@
   "ech_domain": "cloudflare-ech.com",
   "routing_mode": "bypass_cn",
   "web_addr": ":30001",
-  "web_password": "",
-  "cfip_add": [],
-  "cfip_del": []
+  "web_password": ""
 }
