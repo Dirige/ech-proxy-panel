@@ -1,6 +1,6 @@
 name: Release
 
-# 推送 v* tag 时构建 Linux 双架构产物并发布 GitHub Release
+# 推 v* tag 时自动构建 Linux 双架构二进制并创建 GitHub Release
 on:
   push:
     tags:
@@ -51,6 +51,6 @@ jobs:
             gh release create "${GITHUB_REF_NAME}" \
               dist/ech-workers-linux-amd64.tar.gz \
               dist/ech-workers-linux-arm64.tar.gz \
-              --title "${GITHUB_REF_NAME} — ECH Proxy Panel" \
+              --title "${GITHUB_REF_NAME} · ECH Proxy Panel" \
               --generate-notes
           fi
