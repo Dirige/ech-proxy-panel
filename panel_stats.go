@@ -188,6 +188,14 @@ type panelTunnel struct {
 // 分流决策（自定义规则优先，未命中回落原版 shouldBypassProxy）+ 登记连接 +
 // 返回包装后的 conn（读=上传、写=下载），交回原版流程继续处理。
 func panelTunnelBegin(conn net.Conn, clientAddr, target, targetHost string, mode int) (net.Conn, *panelTunnel) {
+	// 清除原版 handleConnection 的30秒"握手限时"deadline（绝对时间）。
+	// 原版只有代理分支在拨通 WS 后清除它，直连分支从不清除，导致所有直连连接
+	//（bypass_cn 国内站点、direct 规则）在建立30秒后被硬断——传输中也照断，
+	// 表现为"视频缓冲完成即断连、看完缓存要重新连接重新缓冲"。
+	// 至此 SOCKS5/HTTP 握手已完成（未完成握手的连接到不了这里，限时依然生效），
+	// 两条分支都不再需要它；代理分支原版随后的同款清除语句保持不变，重复清除无害。
+	conn.SetDeadline(time.Time{})
+
 	out, matched, rule := routeDecision(targetHost)
 
 	modeStr := "socks5"
