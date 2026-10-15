@@ -1,6 +1,6 @@
 # ECH Proxy Panel
 
-基于 [byJoey/ech-wk](https://github.com/byJoey/ech-wk) 原版源码的二次修改：**原版 `ech-workers.go` 逐字节保留（仅 4 处标记为 `[面板钩子 A~D]` 的接入点，共约 10 行）**，在其上叠加「分流规则补充（直连列表 / 代理列表）」、「不影响代理行为的 Web 管理面板」与「每日定时自重启」三块功能。面板代码全部位于独立的 `panel_*.go` 文件中，可随时与原版做 diff 对照。
+基于 [byJoey/ech-wk](https://github.com/byJoey/ech-wk) 原版源码的二次修改：**原版 `ech-workers.go` 逐字节保留（仅 4 处标记为 `[面板钩子 A~D]` 的接入点，共约 10 行）**，在其上叠加「分流规则补充（直连列表 / 代理列表）」、「不影响代理行为的 Web 管理面板」与「每日定时自重启」三块功能。面板代码全部集中在单个 `panel.go` 中，与原版做 diff 对照更直观。
 
 > 免费 ECH 节点由 [Telegram 频道](https://t.me/honghongtg) 提供，感谢维护！
 >
