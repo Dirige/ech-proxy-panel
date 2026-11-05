@@ -43,7 +43,7 @@ import (
 //	→ Web 面板与 API（内嵌 index.html）→ 出口 IP 检测 → 每日定时自重启
 
 // appVersion 面板与镜像版本号（发版时同步改这里 + workflow tag）
-const appVersion = "1.6"
+const appVersion = "1.7"
 
 const (
 	// defaultConfigPath 配置文件默认路径（flag 默认值）
@@ -57,6 +57,7 @@ var (
 	webAddr      string // Web 管理面板监听地址
 	rulesFile    string // 自定义规则文件路径（只读桶）
 	rulesData    string // 面板规则持久化文件路径（可编辑桶）
+	profilesData string // 多配置方案持久化文件路径
 	configFile   string // 配置文件路径
 	webPassword  string // Web 管理面板登录密码（为空则不需登录）
 	restartAtRaw string // 每日定时重启时间 (HH:MM，off=关闭)
@@ -71,6 +72,7 @@ func init() {
 	flag.StringVar(&webAddr, "web", "", "Web 管理面板监听地址 (如 :30001)")
 	flag.StringVar(&rulesFile, "rules", "", "自定义规则文件路径 (type,value,action CSV，只读)")
 	flag.StringVar(&rulesData, "rules-data", "/data/rules.json", "面板规则持久化文件路径")
+	flag.StringVar(&profilesData, "profiles-data", "/data/profiles.json", "多配置方案持久化文件路径")
 	flag.StringVar(&configFile, "config", defaultConfigPath, "配置文件路径")
 	flag.StringVar(&webPassword, "password", "", "Web 管理面板登录密码 (为空则不需登录)")
 	flag.StringVar(&restartAtRaw, "restart-at", "05:00", "每日定时重启 (本地时区 HH:MM，off=关闭，进程内自重启不中断容器)")
@@ -113,6 +115,7 @@ func panelStartup() {
 	applyEnv("password", "ECH_PASSWORD", &webPassword)
 	applyEnv("config", "ECH_CONFIG", &configFile)
 	applyEnv("rules-data", "ECH_RULES_DATA", &rulesData)
+	applyEnv("profiles-data", "ECH_PROFILES_DATA", &profilesData)
 	applyEnv("restart-at", "ECH_RESTART_AT", &restartAtRaw)
 
 	// 3) 配置文件：只填充「命令行与环境变量都没提供」的项。
@@ -174,6 +177,7 @@ func panelStartup() {
 		}
 	}
 	loadRulesDataFile()
+	loadProfilesFile()
 
 	// 7) 启动面板服务
 	startExitInfoDetector()    // 出口 IP：启动 5 秒后探测一次，之后按需检测
@@ -577,6 +581,371 @@ func loadRulesDataFile() {
 	log.Printf("[规则] 已加载面板规则 %d 条（文件规则 %d 条，生效合计 %d 条）", panelCnt, fileCnt, total)
 }
 
+// ======================== 多配置方案 ========================
+//
+// 可同时保存多套配置（7 个业务字段：代理监听地址/服务端地址/优选IP/令牌/分流模式/
+// DoH服务器/ECH域名），Web 面板一键切换、重命名、删除。持久化到 profiles.json，
+// 与 rules.json 同范式（-profiles-data flag / ECH_PROFILES_DATA 环境变量）。
+// web_addr / web_password 属面板级配置，不随方案切换。
+
+// proxyProfile 单个配置方案（只含 7 个业务字段）
+type proxyProfile struct {
+	Name        string `json:"name"`
+	ListenAddr  string `json:"listen_addr"`
+	ServerAddr  string `json:"server_addr"`
+	ServerIP    string `json:"server_ip"`
+	Token       string `json:"token"`
+	DNSServer   string `json:"dns_server"`
+	ECHDomain   string `json:"ech_domain"`
+	RoutingMode string `json:"routing_mode"`
+}
+
+// profileStore 方案集合与当前生效方案名
+type profileStore struct {
+	Active   string         `json:"active"`
+	Profiles []proxyProfile `json:"profiles"`
+}
+
+var (
+	profiles    profileStore
+	profilesMu  sync.RWMutex
+	switchingMu sync.Mutex // 切换/删除连带切换串行化，避免并发切换互相覆盖
+)
+
+// loadProfilesFile 从文件加载配置方案；文件不存在时创建「默认」方案（取自当前配置）
+func loadProfilesFile() {
+	if profilesData == "" {
+		return
+	}
+	data, err := os.ReadFile(profilesData)
+	if err == nil {
+		if json.Unmarshal(data, &profiles) == nil && len(profiles.Profiles) > 0 {
+			log.Printf("[配置] 已加载 %d 套配置方案 (%s)，当前: %s", len(profiles.Profiles), profilesData, profiles.Active)
+			return
+		}
+	}
+
+	// 首次使用（或文件损坏/为空）：以当前配置建「默认」方案
+	profiles = profileStore{
+		Active: "默认",
+		Profiles: []proxyProfile{{
+			Name:        "默认",
+			ListenAddr:  listenAddr,
+			ServerAddr:  serverAddr,
+			ServerIP:    serverIP,
+			Token:       token,
+			DNSServer:   dnsServer,
+			ECHDomain:   echDomain,
+			RoutingMode: routingMode,
+		}},
+	}
+	if err := saveProfilesFile(); err != nil {
+		log.Printf("[配置] 创建默认配置方案失败: %v", err)
+	} else {
+		log.Printf("[配置] 已创建默认配置方案: %s", profilesData)
+	}
+}
+
+// saveProfilesFile 持久化配置方案到文件
+func saveProfilesFile() error {
+	data, err := json.MarshalIndent(profiles, "", "  ")
+	if err != nil {
+		return err
+	}
+	if dir := filepath.Dir(profilesData); dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return fmt.Errorf("创建方案目录失败: %w", err)
+		}
+	}
+	return os.WriteFile(profilesData, data, 0600)
+}
+
+// findProfileLocked 按名字查找方案（调用方需已持有 profilesMu）
+func findProfileLocked(name string) *proxyProfile {
+	for i := range profiles.Profiles {
+		if profiles.Profiles[i].Name == name {
+			return &profiles.Profiles[i]
+		}
+	}
+	return nil
+}
+
+// currentProfileFromGlobals 由当前 7 个全局变量构造方案快照
+func currentProfileFromGlobals(name string) proxyProfile {
+	return proxyProfile{
+		Name:        name,
+		ListenAddr:  listenAddr,
+		ServerAddr:  serverAddr,
+		ServerIP:    serverIP,
+		Token:       token,
+		DNSServer:   dnsServer,
+		ECHDomain:   echDomain,
+		RoutingMode: routingMode,
+	}
+}
+
+// applyProfile 校验并把方案字段应用到全局变量，再刷新 ECH。
+// 任一步失败返回错误且不修改任何全局状态（校验先行，ECH 刷新失败时回滚）。
+func applyProfile(p proxyProfile) error {
+	p.ListenAddr = strings.TrimSpace(p.ListenAddr)
+	p.ServerAddr = strings.TrimSpace(p.ServerAddr)
+	if p.ListenAddr != "" && !validHostPort(p.ListenAddr) {
+		return fmt.Errorf("listen_addr 非法: %s", p.ListenAddr)
+	}
+	if p.ServerAddr == "" || !validHostPort(p.ServerAddr) {
+		return fmt.Errorf("server_addr 非法: %s", p.ServerAddr)
+	}
+	if p.DNSServer == "" || p.ECHDomain == "" {
+		return fmt.Errorf("dns_server / ech_domain 不能为空")
+	}
+	switch p.RoutingMode {
+	case "global", "bypass_cn", "none", "custom":
+	default:
+		return fmt.Errorf("routing_mode 无效: %s", p.RoutingMode)
+	}
+
+	// 先应用新值再刷新 ECH：prepareECH 按 echDomain/dnsServer 全局量查询；
+	// 刷新失败则回滚旧值（旧配置仍生效），避免「切换失败却已换地址」
+	oldListen, oldServer, oldIP, oldToken := listenAddr, serverAddr, serverIP, token
+	oldDNS, oldECH, oldRouting := dnsServer, echDomain, routingMode
+	listenAddr, serverAddr, serverIP, token = p.ListenAddr, p.ServerAddr, p.ServerIP, p.Token
+	dnsServer, echDomain, routingMode = p.DNSServer, p.ECHDomain, p.RoutingMode
+	if err := refreshECH(); err != nil {
+		listenAddr, serverAddr, serverIP, token = oldListen, oldServer, oldIP, oldToken
+		dnsServer, echDomain, routingMode = oldDNS, oldECH, oldRouting
+		return fmt.Errorf("ECH 配置刷新失败（保持原配置）: %w", err)
+	}
+
+	if routingMode == "bypass_cn" {
+		ensureChinaIPs()
+	}
+	return nil
+}
+
+// handleProfiles 多配置方案 API：GET 列表，/save /switch /rename /delete 子动作
+func handleProfiles(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	if r.Method == "GET" {
+		profilesMu.RLock()
+		store := profileStore{
+			Active:   profiles.Active,
+			Profiles: make([]proxyProfile, len(profiles.Profiles)),
+		}
+		copy(store.Profiles, profiles.Profiles)
+		profilesMu.RUnlock()
+		json.NewEncoder(w).Encode(store)
+		return
+	}
+
+	if r.Method != "POST" {
+		http.Error(w, `{"error":"method not allowed"}`, 405)
+		return
+	}
+
+	var req struct {
+		Name    string `json:"name"`
+		NewName string `json:"new_name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, `{"error":"invalid json"}`, 400)
+		return
+	}
+
+	switch action := strings.TrimPrefix(r.URL.Path, "/api/profiles/"); action {
+	case "save":
+		handleProfileSave(w, strings.TrimSpace(req.Name))
+	case "switch":
+		handleProfileSwitch(w, strings.TrimSpace(req.Name))
+	case "rename":
+		handleProfileRename(w, strings.TrimSpace(req.Name), strings.TrimSpace(req.NewName))
+	case "delete":
+		handleProfileDelete(w, strings.TrimSpace(req.Name))
+	default:
+		json.NewEncoder(w).Encode(map[string]string{"error": "unknown action"})
+	}
+}
+
+// handleProfileSave 把当前运行配置保存为指定名字的方案（已存在则覆盖）
+func handleProfileSave(w http.ResponseWriter, name string) {
+	if name == "" {
+		json.NewEncoder(w).Encode(map[string]string{"error": "方案名不能为空"})
+		return
+	}
+
+	profilesMu.Lock()
+	defer profilesMu.Unlock()
+
+	p := currentProfileFromGlobals(name)
+	if existing := findProfileLocked(name); existing != nil {
+		*existing = p
+	} else {
+		profiles.Profiles = append(profiles.Profiles, p)
+	}
+	if err := saveProfilesFile(); err != nil {
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	log.Printf("[配置] 已保存配置方案: %s", name)
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+// handleProfileSwitch 一键切换到指定方案。
+// 监听地址是启动时绑定的 listener，无法运行时改绑：变化时已把新配置落盘，
+// 随即 re-exec 重启进程（Linux/Docker 秒级同 PID 重启）；重启不可用（Windows）则提示手动重启。
+func handleProfileSwitch(w http.ResponseWriter, name string) {
+	switchingMu.Lock()
+	defer switchingMu.Unlock()
+
+	profilesMu.RLock()
+	p := findProfileLocked(name)
+	if p == nil {
+		profilesMu.RUnlock()
+		json.NewEncoder(w).Encode(map[string]string{"error": "方案不存在: " + name})
+		return
+	}
+	target := *p
+	profilesMu.RUnlock()
+
+	listenChanged := target.ListenAddr != "" && target.ListenAddr != listenAddr
+
+	if err := applyProfile(target); err != nil {
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+
+	// 生效后更新指针与配置落盘（顺序：方案指针 → 主配置；主配置失败仅记日志）
+	profilesMu.Lock()
+	profiles.Active = name
+	profilesMu.Unlock()
+	if err := saveProfilesFile(); err != nil {
+		log.Printf("[配置] 保存方案文件失败: %v", err)
+	}
+	if err := saveConfig(configFile); err != nil {
+		log.Printf("[配置] 保存配置文件失败: %v", err)
+	} else {
+		log.Printf("[配置] 已切换到配置方案: %s", name)
+	}
+
+	if listenChanged {
+		if exe, err := os.Executable(); err == nil {
+			if err := selfRestart(exe); err == nil {
+				return // re-exec 成功：同 PID 原地替换，不会走到这里
+			}
+			log.Printf("[配置] 自动重启失败（%v），监听地址需手动重启生效", err)
+		} else {
+			log.Printf("[配置] 获取可执行路径失败（%v），监听地址需手动重启生效", err)
+		}
+		json.NewEncoder(w).Encode(map[string]string{
+			"status":  "ok",
+			"message": fmt.Sprintf("已切换到「%s」；监听地址已变更，需重启进程生效", name),
+		})
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok", "message": "已切换到「" + name + "」"})
+}
+
+// handleProfileRename 重命名方案（active 指向同步更新）
+func handleProfileRename(w http.ResponseWriter, name, newName string) {
+	if name == "" || newName == "" {
+		json.NewEncoder(w).Encode(map[string]string{"error": "方案名不能为空"})
+		return
+	}
+
+	profilesMu.Lock()
+	defer profilesMu.Unlock()
+
+	p := findProfileLocked(name)
+	if p == nil {
+		json.NewEncoder(w).Encode(map[string]string{"error": "方案不存在: " + name})
+		return
+	}
+	if findProfileLocked(newName) != nil {
+		json.NewEncoder(w).Encode(map[string]string{"error": "方案已存在: " + newName})
+		return
+	}
+	p.Name = newName
+	if profiles.Active == name {
+		profiles.Active = newName
+	}
+	if err := saveProfilesFile(); err != nil {
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	log.Printf("[配置] 配置方案已重命名: %s → %s", name, newName)
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+// handleProfileDelete 删除方案；删的是当前方案时自动切到剩余第一个方案
+func handleProfileDelete(w http.ResponseWriter, name string) {
+	switchingMu.Lock()
+	defer switchingMu.Unlock()
+
+	profilesMu.Lock()
+	idx := -1
+	for i := range profiles.Profiles {
+		if profiles.Profiles[i].Name == name {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		profilesMu.Unlock()
+		json.NewEncoder(w).Encode(map[string]string{"error": "方案不存在: " + name})
+		return
+	}
+	if len(profiles.Profiles) <= 1 {
+		profilesMu.Unlock()
+		json.NewEncoder(w).Encode(map[string]string{"error": "至少保留一套配置方案"})
+		return
+	}
+	wasActive := profiles.Active == name
+	profiles.Profiles = append(profiles.Profiles[:idx], profiles.Profiles[idx+1:]...)
+	next := profiles.Profiles[0].Name
+	if wasActive {
+		profiles.Active = next
+	}
+	profilesMu.Unlock()
+
+	if err := saveProfilesFile(); err != nil {
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	log.Printf("[配置] 已删除配置方案: %s", name)
+
+	if !wasActive {
+		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+		return
+	}
+	// 删的是当前生效方案：切换到剩余第一个方案，保持「active 即生效」不变式
+	profilesMu.RLock()
+	target := *findProfileLocked(next)
+	profilesMu.RUnlock()
+	// 监听地址是否变化需在应用前判定（applyProfile 会改写 listenAddr 全局量）
+	listenChanged := target.ListenAddr != "" && target.ListenAddr != listenAddr
+	if err := applyProfile(target); err != nil {
+		json.NewEncoder(w).Encode(map[string]string{
+			"status":  "ok",
+			"message": fmt.Sprintf("方案已删除，但切换到「%s」失败（%v），运行配置未变", next, err),
+		})
+		return
+	}
+	if err := saveConfig(configFile); err != nil {
+		log.Printf("[配置] 保存配置文件失败: %v", err)
+	}
+	msg := fmt.Sprintf("方案「%s」已删除，已切换到「%s」", name, next)
+	if listenChanged {
+		// 与 switch 一致：落盘已完成，重启让监听地址生效
+		if exe, err := os.Executable(); err == nil {
+			if err := selfRestart(exe); err == nil {
+				return
+			}
+		}
+		msg += "；监听地址已变更，需重启进程生效"
+	}
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok", "message": msg})
+}
+
 // ======================== 中国 IP 列表（运行时补加载） ========================
 
 // ensureChinaIPs 确保中国 IP 列表已加载。启动时模式即为 bypass_cn 的情况由原版
@@ -902,6 +1271,8 @@ func startWebServer(addr string) {
 	mux.Handle("/api/status", authMiddleware(http.HandlerFunc(handleStatus)))
 	mux.Handle("/api/config", authMiddleware(http.HandlerFunc(handleConfig)))
 	mux.Handle("/api/rules", authMiddleware(http.HandlerFunc(handleRules)))
+	mux.Handle("/api/profiles", authMiddleware(http.HandlerFunc(handleProfiles)))
+	mux.Handle("/api/profiles/", authMiddleware(http.HandlerFunc(handleProfiles)))
 	mux.Handle("/api/connections", authMiddleware(http.HandlerFunc(handleConnections)))
 	mux.Handle("/api/traffic", authMiddleware(http.HandlerFunc(handleTraffic)))
 	mux.Handle("/api/logs", authMiddleware(http.HandlerFunc(handleLogs)))

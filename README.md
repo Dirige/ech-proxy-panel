@@ -17,7 +17,8 @@
 - **流量页**：实时上传/下载速度、总量、活动连接、运行时长卡片 + 上传/下载速度趋势图（ws 每 2 秒采样）
 - **出口 IP 检测卡片**：出口 IP + Cloudflare COLO，按需检测并缓存 10 分钟
 - **登录鉴权**：可选密码保护（不设密码则无需登录）
-- **配置持久化**：`/data/config.json` + `/data/rules.json`，面板修改保存即生效，重启不丢失
+- **配置持久化**：`/data/config.json` + `/data/rules.json` + `/data/profiles.json`，面板修改保存即生效，重启不丢失
+- **多配置方案**：可同时保存多套配置（监听地址 / 服务端地址 / 优选IP / 令牌 / 分流模式 / DoH / ECH 域名），面板「规则配置」页一键切换（监听地址变化时自动重启进程），方案可重命名、删除
 - **每日定时自重启**：默认 `05:00` 进程内 re-exec 自重启，**不依赖容器 restart 策略**
 - **参数优先级（原版 flag 语义为王）**：命令行 > 环境变量 `ECH_*` > 配置文件 > 原版 flag 默认值；无任何隐藏硬编码默认，`-f` 未提供且配置里也没有时按原版行为直接报错退出
 - **中国 IP 列表**：原版 loader 识别的「起始IP 结束IP」两列格式（与上游 mayaxcn 源格式一致），按 `程序目录 → 当前目录` 查找，缺失时自动下载
@@ -108,6 +109,7 @@ docker run -d --name ech-proxy --restart always \
 | `-config` | `ECH_CONFIG` | `/data/config.json` | 配置文件路径 |
 | `-rules` | — | （空） | CSV 规则文件（只读桶，`type,value,action` 每行一条） |
 | `-rules-data` | `ECH_RULES_DATA` | `/data/rules.json` | 面板规则持久化文件（面板可编辑的规则桶） |
+| `-profiles-data` | `ECH_PROFILES_DATA` | `/data/profiles.json` | 多配置方案持久化文件（面板可编辑） |
 | `-restart-at` | `ECH_RESTART_AT` | `05:00` | 每日定时重启（容器本地时区 `HH:MM`，`off`=关闭；进程内 re-exec 自重启） |
 
 **优先级**：命令行参数（显式传入才生效）> 环境变量 > config.json > flag 默认值；配置文件只填充「命令行与环境变量都没提供」的项（旧配置文件里的 `proxy_ip` / `upstream` / `fallback` / `recycle_*` 字段会被自动忽略，保存时剔除）

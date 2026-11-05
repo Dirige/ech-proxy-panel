@@ -227,6 +227,10 @@ select.theme-select:focus{outline:none;border-color:var(--cyan)}
 
 /* ===== Config ===== */
 .config-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px}
+.profile-list{display:flex;flex-wrap:wrap;gap:8px}
+.profile-chip{padding:8px 16px;background:rgba(7,11,20,.4);border:1px solid var(--border);border-radius:20px;color:var(--text-sec);font-size:13px;cursor:pointer;transition:.15s;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.profile-chip:hover{border-color:var(--border-hover);color:var(--text)}
+.profile-chip.active{border-color:var(--cyan);color:var(--cyan);background:rgba(34,211,238,.08);font-weight:600}
 .config-item{
   background:var(--glass);backdrop-filter:blur(12px);border:1px solid var(--border);
   border-radius:var(--radius);padding:16px;transition:border-color .2s;
@@ -481,6 +485,20 @@ select.theme-select:focus{outline:none;border-color:var(--cyan)}
         <button class="btn btn-primary" onclick="saveConfig()">保存并刷新 ECH</button>
       </div>
     </div>
+    <div class="panel" style="margin-bottom:18px">
+      <div class="panel-header">
+        <span class="panel-title">配置方案</span>
+        <div class="actions" style="margin:0">
+          <button class="btn btn-sm" onclick="saveProfileDialog()">💾 存当前为新方案</button>
+          <button class="btn btn-sm" onclick="renameActiveProfile()">✏️ 重命名</button>
+          <button class="btn btn-sm" onclick="deleteActiveProfile()">🗑 删除</button>
+        </div>
+      </div>
+      <div class="panel-body">
+        <div id="profile-list" class="profile-list"></div>
+        <div class="hint" style="margin-top:10px">点击方案一键切换：服务端地址 / 优选IP / 令牌 / 分流模式 / DoH / ECH 域名立即生效，代理监听地址变化时自动重启进程。「存当前为新方案」会先保存表单中的配置再存为方案。</div>
+      </div>
+    </div>
     <div class="config-grid">
       <div class="config-item"><label>代理监听地址</label><input id="cfg-listen"></div>
       <div class="config-item"><label>服务端地址</label><input id="cfg-server"></div>
@@ -646,7 +664,7 @@ function switchPage(pg){
   stopConnRefresh();stopLogsRefresh();
   if(pg==='overview'){loadOverview();startLogsRefresh()}
   else if(pg==='connections'){loadConnections();startConnRefresh()}
-  else if(pg==='config'){loadConfig();loadRules()}
+  else if(pg==='config'){loadConfig();loadRules();loadProfiles()}
   else if(pg==='traffic')loadTraffic();
 }
 document.querySelectorAll('.nav-item').forEach(el=>el.addEventListener('click',()=>switchPage(el.dataset.page)));
@@ -763,6 +781,58 @@ window.addEventListener('beforeunload',e=>{if(rulesDirty){e.preventDefault();e.r
 async function loadConfig(){const c=await api('/api/config');document.getElementById('cfg-listen').value=c.listen_addr;document.getElementById('cfg-server').value=c.server_addr;document.getElementById('cfg-serverip').value=c.server_ip;document.getElementById('cfg-token').value=c.token;document.getElementById('cfg-dns').value=c.dns_server;document.getElementById('cfg-ech').value=c.ech_domain;document.getElementById('cfg-routing').value=c.routing_mode;document.getElementById('cfg-web').value=(c.web_addr||'').replace(/^:/,'');document.getElementById('cfg-password').value=c.web_password||''}
 async function saveConfig(){await api('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({listen_addr:document.getElementById('cfg-listen').value,server_addr:document.getElementById('cfg-server').value,server_ip:document.getElementById('cfg-serverip').value,token:document.getElementById('cfg-token').value,dns_server:document.getElementById('cfg-dns').value,ech_domain:document.getElementById('cfg-ech').value,routing_mode:document.getElementById('cfg-routing').value,web_addr:document.getElementById('cfg-web').value,web_password:document.getElementById('cfg-password').value})});toast('配置已保存（监听/端口类需重启，其余立即生效）');loadConfig()}
 async function refreshECH(){const r=await api('/api/service/refresh-ech',{method:'POST'});toast(r.message||r.error);loadOverview()}
+
+// ===== 多配置方案 =====
+let profileStoreData={active:'',profiles:[]};
+async function loadProfiles(){try{profileStoreData=await api('/api/profiles');renderProfiles()}catch(e){}}
+function renderProfiles(){
+  const el=document.getElementById('profile-list');el.innerHTML='';
+  (profileStoreData.profiles||[]).forEach(p=>{
+    const b=document.createElement('button');
+    b.className='profile-chip'+(p.name===profileStoreData.active?' active':'');
+    b.textContent=p.name;b.title=p.name+'（点击切换）';
+    b.onclick=()=>switchProfile(p.name);
+    el.appendChild(b);
+  });
+}
+async function switchProfile(name){
+  if(name===profileStoreData.active)return;
+  if(!confirm('切换到配置方案「'+name+'」？监听地址变化时进程将自动重启，当前连接会瞬断。'))return;
+  try{
+    const r=await api('/api/profiles/switch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name})});
+    if(r.error){toast('切换失败: '+r.error);return}
+    toast(r.message||'已切换到「'+name+'」');
+  }catch(e){/* 自动重启时页面请求中断属正常现象 */}
+  await loadProfiles();loadConfig();
+}
+async function saveProfileDialog(){
+  const name=prompt('把当前配置保存为新方案，请输入方案名称：');
+  if(!name||!name.trim())return;
+  await saveConfig(); // 先应用并落盘表单里的配置，方案内容才与所见一致
+  const r=await api('/api/profiles/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name.trim()})});
+  if(r.error){toast('保存失败: '+r.error);return}
+  toast('方案「'+name.trim()+'」已保存');
+  await loadProfiles();
+}
+async function renameActiveProfile(){
+  const old=profileStoreData.active;
+  if(!old){toast('暂无方案');return}
+  const nn=prompt('重命名方案「'+old+'」为：',old);
+  if(!nn||!nn.trim()||nn.trim()===old)return;
+  const r=await api('/api/profiles/rename',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:old,new_name:nn.trim()})});
+  if(r.error){toast(r.error);return}
+  toast('已重命名为「'+nn.trim()+'」');
+  await loadProfiles();
+}
+async function deleteActiveProfile(){
+  const name=profileStoreData.active;
+  if(!name){toast('暂无方案');return}
+  if(!confirm('删除方案「'+name+'」？删除后自动切换到第一个方案。'))return;
+  const r=await api('/api/profiles/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name})});
+  if(r.error){toast(r.error);return}
+  toast(r.message||'方案「'+name+'」已删除');
+  await loadProfiles();loadConfig();
+}
 
 let ws;
 function connectWS(){const proto=location.protocol==='https:'?'wss:':'ws:';ws=new WebSocket(`${proto}//${location.host}/ws`);ws.onmessage=(e)=>{try{const d=JSON.parse(e.data);document.getElementById('ov-active').textContent=d.active_conns;document.getElementById('ov-total-up').textContent=fmtBytes(d.total_upload);document.getElementById('ov-total-down').textContent=fmtBytes(d.total_download);document.getElementById('ov-mem').textContent=d.memory_mb.toFixed(1)+' MB';document.getElementById('ov-speed-up').textContent=fmtSpeed(d.rt_upload||0);document.getElementById('ov-speed-down').textContent=fmtSpeed(d.rt_download||0);document.getElementById('tf-active').textContent=d.active_conns;document.getElementById('tf-speed-up').textContent=fmtSpeed(d.rt_upload||0);document.getElementById('tf-speed-down').textContent=fmtSpeed(d.rt_download||0);document.getElementById('tf-total-up').textContent=fmtBytes(d.total_upload||0);document.getElementById('tf-total-down').textContent=fmtBytes(d.total_download||0);document.getElementById('tf-uptime').textContent=fmtUptime(d.uptime);pushTrafficSample(d.rt_upload,d.rt_download)}catch(ex){}};ws.onclose=()=>setTimeout(connectWS,3000)}
